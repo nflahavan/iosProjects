@@ -8,11 +8,8 @@ import UIKit
 /// finger landed — never a transaction's description or amount, so bank data
 /// stays out of it. Category and source names are in it; you made those up.
 ///
-/// Each launch writes its own file in the app's Documents, and copies it to the
-/// app's iCloud Drive folder, which shows up on the Mac under
-/// `~/Library/Mobile Documents/iCloud~com~nikflahavan~risu/Documents/Telemetry/`.
-/// Settings ▸ Export hands the same file to the share sheet when iCloud isn't
-/// there.
+/// Each launch writes its own file in the app's Documents. Settings ▸ Export
+/// hands it to the share sheet; nothing leaves the phone otherwise.
 @MainActor
 final class Telemetry {
     static let shared = Telemetry()
@@ -22,8 +19,6 @@ final class Telemetry {
     let fileURL: URL
     private let session = UUID().uuidString.prefix(8)
     private var lines: [String] = []
-    private var cloudFolder: URL?
-    private var pendingMirror: Task<Void, Never>?
     private let started = Date()
 
     private init() {
@@ -32,14 +27,6 @@ final class Telemetry {
         let folder = URL.documentsDirectory.appending(path: "Telemetry")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         fileURL = folder.appending(path: "risu-\(stamp)-\(session).jsonl")
-        Task.detached(priority: .utility) {
-            // Must not run on the main thread: the first call can block while
-            // iCloud sets the folder up.
-            let url = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.nikflahavan.risu")?
-                .appending(path: "Documents/Telemetry")
-            if let url { try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
-            await MainActor.run { Telemetry.shared.cloudFolder = url; Telemetry.shared.mirror() }
-        }
     }
 
     func start() {
@@ -66,7 +53,6 @@ final class Telemetry {
         lines.append(line)
         let all = Data((lines.joined(separator: "\n") + "\n").utf8)
         try? all.write(to: fileURL, options: .atomic)
-        scheduleMirror()
     }
 
     /// A touch on the screen, as a fraction of its width and height, so it
@@ -75,23 +61,6 @@ final class Telemetry {
         guard size.width > 0, size.height > 0 else { return }
         log("tap", ["x": String(format: "%.3f", point.x / size.width),
                     "y": String(format: "%.3f", point.y / size.height)])
-    }
-
-    /// Copies to iCloud at most every few seconds, not once per tap.
-    private func scheduleMirror() {
-        guard pendingMirror == nil else { return }
-        pendingMirror = Task {
-            try? await Task.sleep(for: .seconds(3))
-            mirror()
-            pendingMirror = nil
-        }
-    }
-
-    private func mirror() {
-        guard let cloudFolder, FileManager.default.fileExists(atPath: fileURL.path) else { return }
-        let target = cloudFolder.appending(path: fileURL.lastPathComponent)
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        try? data.write(to: target, options: .atomic)
     }
 }
 

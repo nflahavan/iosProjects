@@ -286,7 +286,7 @@ struct SettingsScreen: View {
                         Label("Export this session's log", systemImage: "square.and.arrow.up")
                     }
                 } header: { Text("Usage log") } footer: {
-                    Text("Records screens, taps and choices, never a transaction's description or amount. It also copies itself to Risu's iCloud Drive folder.")
+                    Text("Records screens, taps and choices, never a transaction's description or amount. It stays on this phone unless you export it.")
                 }
                 Section {
                     LabeledContent("Version", value: "\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"))")

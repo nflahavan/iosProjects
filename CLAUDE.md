@@ -35,6 +35,5 @@ take minutes.
 ## Telemetry
 
 The app logs screens, taps and choices (never descriptions or amounts) as JSON lines,
-one file per launch, and copies them to its iCloud Drive folder. On this Mac:
-`~/Library/Mobile Documents/iCloud~com~nikflahavan~risu/Documents/Telemetry/`.
-Settings ▸ Export in the app is the fallback.
+one file per launch, kept on the phone. Settings ▸ Export shares it; AirDrop it to this
+Mac or save it to Files, and it can be read from there.
