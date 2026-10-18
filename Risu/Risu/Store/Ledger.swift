@@ -61,6 +61,18 @@ extension ModelContext {
         }
     }
 
+    /// Rows already decided, the most recently decided first: what the
+    /// review's Back button steps through.
+    func recentlyDecided(limit: Int = 200) -> [LedgerEntry] {
+        var descriptor = FetchDescriptor<LedgerEntry>(
+            predicate: #Predicate { $0.reviewedAt != nil },
+            sortBy: [SortDescriptor(\.reviewedAt, order: .reverse)])
+        descriptor.fetchLimit = limit
+        return (try? fetch(descriptor)) ?? []
+    }
+
+    /// Records a decision. Changing one later keeps when it was first
+    /// decided, so going back through the review keeps its order.
     func decide(_ entry: LedgerEntry, kind: Kind, sign: Int, category: Category?) throws {
         // A transfer has no category, so whatever chip was picked is dropped.
         if kind != .transfer {
@@ -70,7 +82,7 @@ extension ModelContext {
         entry.kind = kind
         entry.sign = sign >= 0 ? 1 : -1
         entry.category = kind == .transfer ? nil : category
-        entry.reviewedAt = .now
+        if entry.reviewedAt == nil { entry.reviewedAt = .now }
         try save()
     }
 

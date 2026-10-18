@@ -24,6 +24,9 @@ struct ImportFlow: View {
             Group {
                 if let summary {
                     result(summary)
+                } else if let table, sources.isEmpty {
+                    // The first import has only one answer to "which account?".
+                    MappingScreen(table: table) { source in run(into: source) }
                 } else if let table {
                     choose(table)
                 } else {
@@ -53,7 +56,11 @@ struct ImportFlow: View {
             } message: { Text(problem ?? "") }
             .screen("import")
         }
-        .onAppear { Telemetry.shared.log("import-opened", ["columns": "\(table?.header.count ?? 0)", "rows": "\(table?.rows.count ?? 0)"]) }
+        .onAppear {
+            Telemetry.shared.log("import-opened", ["columns": "\(table?.header.count ?? 0)", "rows": "\(table?.rows.count ?? 0)",
+                                                   "header": table?.header.joined(separator: " | ") ?? "",
+                                                   "sources": "\(sources.count)"])
+        }
     }
 
     private func choose(_ table: CSVTable) -> some View {
@@ -61,8 +68,13 @@ struct ImportFlow: View {
         let others = sources.filter { $0.header != table.header }
         return List {
             Section {
-                Text("\(table.rows.count) rows. Which account is this from?")
-                    .foregroundStyle(.secondary)
+                CSVGrid(table: table, rows: 12)
+                    .frame(height: 220)
+                    .listRowInsets(EdgeInsets())
+            } header: {
+                Text("\(table.rows.count) rows")
+            } footer: {
+                Text("Which account is this from?")
             }
             if !matching.isEmpty {
                 Section("Matches this file") {
@@ -151,8 +163,49 @@ struct MappingScreen: View {
         return false
     }
 
+    /// What each column is used for, for the grid's labels.
+    private var roles: [Int: String] {
+        var roles: [Int: String] = [mapping.date: "Date", mapping.description: "Description"]
+        switch mapping.amount {
+        case .single(let c, _): roles[c] = "Amount"
+        case .split(let o, let i): roles[o] = "Money out"; roles[i] = "Money in"
+        }
+        return roles
+    }
+
+    private var roleChoices: [String] {
+        split ? ["Date", "Description", "Money out", "Money in"] : ["Date", "Description", "Amount"]
+    }
+
+    private func assign(_ column: Int, _ role: String) {
+        switch role {
+        case "Date":
+            mapping.date = column
+            let values = table.rows.prefix(50).map { column < $0.count ? $0[column] : "" }
+            if let layout = DateLayout.fitting(values).first { mapping.dateLayout = layout }
+        case "Description": mapping.description = column
+        case "Amount":
+            if case .single(_, let inPositive) = mapping.amount { mapping.amount = .single(column: column, moneyInIsPositive: inPositive) }
+        case "Money out":
+            if case .split(_, let i) = mapping.amount { mapping.amount = .split(moneyOut: column, moneyIn: i) }
+        case "Money in":
+            if case .split(let o, _) = mapping.amount { mapping.amount = .split(moneyOut: o, moneyIn: column) }
+        default: break
+        }
+        Telemetry.shared.log("mapping-assign", ["role": role, "column": table.header[column], "via": "grid"])
+    }
+
     var body: some View {
         Form {
+            Section {
+                CSVGrid(table: table, roles: roles, choices: roleChoices, assign: assign)
+                    .frame(height: 260)
+                    .listRowInsets(EdgeInsets())
+            } header: {
+                Text("Your file · \(table.rows.count) rows")
+            } footer: {
+                Text("Tap a column's name to use it for the date, description or amount.")
+            }
             Section("Name") {
                 TextField("e.g. Chase Sapphire", text: $name)
             }
@@ -213,7 +266,10 @@ struct MappingScreen: View {
             Button("OK") { problem = nil }
         } message: { Text(problem ?? "") }
         .screen("mapping")
-        .onChange(of: mapping) { _, new in Telemetry.shared.log("mapping-changed", ["columns": new.columns.map(String.init).joined(separator: ",")]) }
+        .onChange(of: mapping) { _, _ in
+            Telemetry.shared.log("mapping-changed", roles.sorted { $0.key < $1.key }
+                .reduce(into: [:]) { $0[$1.value] = table.header[$1.key] })
+        }
     }
 
     private var amountColumns: (Int, Int) {

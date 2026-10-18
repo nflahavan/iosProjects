@@ -285,6 +285,7 @@ struct SettingsScreen: View {
                     ShareLink(item: Telemetry.shared.fileURL) {
                         Label("Export this session's log", systemImage: "square.and.arrow.up")
                     }
+                    .simultaneousGesture(TapGesture().onEnded { Telemetry.shared.log("export-log") })
                 } header: { Text("Usage log") } footer: {
                     Text("Records screens, taps and choices, never a transaction's description or amount. It stays on this phone unless you export it.")
                 }

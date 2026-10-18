@@ -9,14 +9,36 @@ struct ReviewScreen: View {
     @Query(filter: #Predicate<LedgerEntry> { $0.kindRaw == nil }) private var waiting: [LedgerEntry]
     @State private var picking = false
     @State private var showingSettings = false
+    /// How many decided rows back from the queue you've stepped. 0 is the
+    /// next new row.
+    @State private var backSteps = 0
 
-    private var current: LedgerEntry? { context.reviewQueue().first }
+    private var recent: [LedgerEntry] { context.recentlyDecided() }
+
+    private var current: LedgerEntry? {
+        if backSteps > 0 {
+            let recent = recent
+            return backSteps <= recent.count ? recent[backSteps - 1] : nil
+        }
+        return context.reviewQueue().first
+    }
 
     var body: some View {
         NavigationStack {
             Group {
                 if let entry = current {
-                    ReviewCard(entry: entry, remaining: waiting.count)
+                    ReviewCard(entry: entry, remaining: waiting.count,
+                               revisiting: backSteps > 0,
+                               canGoBack: backSteps < recent.count,
+                               back: {
+                                   backSteps += 1
+                                   Telemetry.shared.log("back", ["steps": "\(backSteps)"])
+                               },
+                               returnToNew: {
+                                   Telemetry.shared.log("back-to-new", ["from": "\(backSteps)"])
+                                   backSteps = 0
+                               },
+                               saved: { if backSteps > 0 { backSteps -= 1 } })
                         .id(entry.persistentModelID)
                 } else {
                     ContentUnavailableView {
@@ -26,6 +48,12 @@ struct ReviewScreen: View {
                     } actions: {
                         Button("Import CSV") { open() }
                             .buttonStyle(.borderedProminent)
+                        if !recent.isEmpty {
+                            Button("Go back over reviewed rows") {
+                                backSteps = 1
+                                Telemetry.shared.log("back", ["steps": "1", "from": "empty"])
+                            }
+                        }
                     }
                 }
             }
@@ -67,6 +95,11 @@ struct ReviewScreen: View {
 struct ReviewCard: View {
     let entry: LedgerEntry
     let remaining: Int
+    var revisiting = false
+    var canGoBack = false
+    var back: () -> Void = {}
+    var returnToNew: () -> Void = {}
+    var saved: () -> Void = {}
     @Environment(\.modelContext) private var context
     @State private var kind: Kind
     @State private var sign: Int
@@ -76,9 +109,16 @@ struct ReviewCard: View {
     @State private var problem: String?
     @State private var shown = Date.now
 
-    init(entry: LedgerEntry, remaining: Int) {
+    init(entry: LedgerEntry, remaining: Int, revisiting: Bool = false, canGoBack: Bool = false,
+         back: @escaping () -> Void = {}, returnToNew: @escaping () -> Void = {},
+         saved: @escaping () -> Void = {}) {
         self.entry = entry
         self.remaining = remaining
+        self.revisiting = revisiting
+        self.canGoBack = canGoBack
+        self.back = back
+        self.returnToNew = returnToNew
+        self.saved = saved
         _kind = State(initialValue: entry.kind ?? (entry.amountCents < 0 ? .expense : .income))
         _sign = State(initialValue: entry.kind == nil ? 1 : entry.sign)
         _category = State(initialValue: entry.category)
@@ -88,6 +128,7 @@ struct ReviewCard: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    if revisiting { revisitBanner }
                     summary
                     DecisionControls(kind: $kind, sign: $sign, category: $category,
                                      addingCategory: $addingCategory)
@@ -106,7 +147,10 @@ struct ReviewCard: View {
         } message: { Text(problem ?? "") }
         .onAppear {
             shown = .now
-            Telemetry.shared.log("card", ["remaining": "\(remaining)", "suggested": kind.rawValue,
+            Telemetry.shared.log("card", ["remaining": "\(remaining)",
+                                          (revisiting ? "decided" : "suggested"): kind.rawValue,
+                                          "category": revisiting ? (category?.name ?? "") : "",
+                                          "revisit": "\(revisiting)",
                                           "source": entry.file?.source?.name ?? "?", "row": "\(entry.row)"])
         }
     }
@@ -131,14 +175,35 @@ struct ReviewCard: View {
         }
     }
 
-    private var nextButton: some View {
-        Button(action: save) {
-            Text(remaining > 1 ? "Save and next" : "Save")
-                .font(.headline)
-                .frame(maxWidth: .infinity, minHeight: 34)
+    private var revisitBanner: some View {
+        HStack {
+            Label("Already reviewed", systemImage: "clock.arrow.circlepath")
+                .font(.subheadline.weight(.semibold))
+            Spacer()
+            Button("Back to new rows", action: returnToNew)
+                .font(.subheadline)
         }
-        .buttonStyle(.borderedProminent)
-        .disabled(kind != .transfer && category == nil)
+        .padding(12)
+        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var nextButton: some View {
+        HStack(spacing: 12) {
+            Button(action: back) {
+                Label("Back", systemImage: "chevron.left")
+                    .font(.headline)
+                    .frame(minHeight: 34)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!canGoBack)
+            Button(action: save) {
+                Text(revisiting ? "Save and forward" : (remaining > 1 ? "Save and next" : "Save"))
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 34)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(kind != .transfer && category == nil)
+        }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(.bar)
@@ -162,8 +227,10 @@ struct ReviewCard: View {
                 "kind": kind.rawValue, "sign": sign > 0 ? "adds" : "subtracts",
                 "category": category?.name ?? "",
                 "seconds": String(format: "%.1f", Date.now.timeIntervalSince(shown)),
-                "remaining": "\(remaining - 1)",
+                "remaining": "\(revisiting ? remaining : remaining - 1)",
+                "revisit": "\(revisiting)",
             ])
+            saved()
         } catch {
             problem = error.localizedDescription
             Telemetry.shared.log("decide-failed", ["why": error.localizedDescription])

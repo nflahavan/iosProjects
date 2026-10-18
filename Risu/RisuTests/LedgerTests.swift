@@ -154,3 +154,28 @@ struct MonthTotalsTests {
         #expect(refund.contribution == 2500)
     }
 }
+
+@Suite("Going back in the review")
+struct GoingBackTests {
+
+    @Test("Back steps through decided rows, newest first; changing one keeps its place")
+    func order() async throws {
+        let context = ModelContext(try RisuStore.container(inMemory: true))
+        let mapping = ColumnMapping(date: 0, description: 1, amount: .single(column: 2, moneyInIsPositive: true),
+                                    dateLayout: .monthDayYear)
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "a.csv", contents: Data("Date,Description,Amount\n10/01/2026,A,-1\n10/02/2026,B,-1\n10/03/2026,C,-1".utf8), into: card)
+        let food = try context.category(named: "Food", kind: .expense)
+        for entry in context.reviewQueue() {
+            try context.decide(entry, kind: .expense, sign: 1, category: food)
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(context.recentlyDecided().map(\.text) == ["C", "B", "A"])
+
+        let fun = try context.category(named: "Fun", kind: .expense)
+        let b = try #require(context.recentlyDecided().first { $0.text == "B" })
+        try context.decide(b, kind: .expense, sign: 1, category: fun)
+        #expect(b.category === fun)
+        #expect(context.recentlyDecided().map(\.text) == ["C", "B", "A"])
+    }
+}

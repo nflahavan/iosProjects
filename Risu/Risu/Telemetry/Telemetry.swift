@@ -15,7 +15,10 @@ final class Telemetry {
     static let shared = Telemetry()
 
     /// What the screen in front of you is called, for every event and tap.
+    /// A stack, because sheets cover screens without making them disappear:
+    /// when a sheet closes, the screen under it is in front again.
     private(set) var screen = "launch"
+    private var stack: [String] = []
     let fileURL: URL
     private let session = UUID().uuidString.prefix(8)
     private var lines: [String] = []
@@ -37,8 +40,18 @@ final class Telemetry {
     }
 
     func entered(_ name: String) {
+        stack.removeAll { $0 == name }
+        stack.append(name)
+        guard screen != name else { return }
         screen = name
         log("screen")
+    }
+
+    func left(_ name: String) {
+        stack.removeAll { $0 == name }
+        guard screen == name, let back = stack.last else { return }
+        screen = back
+        log("screen", ["back": "true"])
     }
 
     func log(_ event: String, _ fields: [String: String] = [:]) {
@@ -99,5 +112,6 @@ extension View {
     /// Names the screen for the telemetry log while it's on screen.
     func screen(_ name: String) -> some View {
         onAppear { Telemetry.shared.entered(name) }
+            .onDisappear { Telemetry.shared.left(name) }
     }
 }
