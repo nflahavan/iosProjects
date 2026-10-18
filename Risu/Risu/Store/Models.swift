@@ -88,6 +88,12 @@ final class LedgerEntry {
     /// that subtracts).
     var sign: Int
     var category: Category?
+    /// When one bank row was several things (a Target run that was groceries
+    /// and household), its pieces. Empty means not split, and `category`
+    /// holds the answer. The row itself stays one transaction, so the merge
+    /// still counts it once.
+    @Relationship(deleteRule: .cascade, inverse: \SplitPart.entry)
+    var parts: [SplitPart] = []
     var file: ImportedFile?
     /// Its row in the file, counted from the first row under the header.
     var row: Int
@@ -102,6 +108,12 @@ final class LedgerEntry {
     var isReviewed: Bool { kindRaw != nil }
     /// What it adds to its kind's total.
     var contribution: Int { sign * abs(amountCents) }
+    var isSplit: Bool { !parts.isEmpty }
+    /// Each category's share, split or not: what the overview adds up.
+    var shares: [(category: Category?, contribution: Int)] {
+        isSplit ? parts.sorted { $0.order < $1.order }.map { ($0.category, sign * $0.cents) }
+                : [(category, contribution)]
+    }
 
     init(parsed: ParsedRow, row: Int, file: ImportedFile) {
         self.dayKey = parsed.day.key
@@ -115,6 +127,22 @@ final class LedgerEntry {
     }
 }
 
+/// One piece of a split transaction. Its amount is positive; the
+/// transaction's sign says which way it counts.
+@Model
+final class SplitPart {
+    var cents: Int
+    var order: Int
+    var category: Category?
+    var entry: LedgerEntry?
+
+    init(cents: Int, order: Int, category: Category) {
+        self.cents = cents
+        self.order = order
+        self.category = category
+    }
+}
+
 @Model
 final class Category {
     var name: String
@@ -123,6 +151,11 @@ final class Category {
 
     @Relationship(deleteRule: .nullify, inverse: \LedgerEntry.category)
     var entries: [LedgerEntry] = []
+    @Relationship(deleteRule: .nullify, inverse: \SplitPart.category)
+    var parts: [SplitPart] = []
+
+    /// Whole transactions plus split pieces: how often it's been chosen.
+    var uses: Int { entries.count + parts.count }
 
     var kind: CategoryKind { CategoryKind(rawValue: kindRaw) ?? .expense }
 
@@ -134,7 +167,7 @@ final class Category {
 }
 
 nonisolated enum RisuStore {
-    static let models: [any PersistentModel.Type] = [Source.self, ImportedFile.self, LedgerEntry.self, Category.self]
+    static let models: [any PersistentModel.Type] = [Source.self, ImportedFile.self, LedgerEntry.self, SplitPart.self, Category.self]
 
     /// Its own file. The app this one replaced left a `default.store` in the
     /// phone's container with a different schema; opening that would fail.

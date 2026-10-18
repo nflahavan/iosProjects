@@ -82,8 +82,37 @@ extension ModelContext {
         entry.kind = kind
         entry.sign = sign >= 0 ? 1 : -1
         entry.category = kind == .transfer ? nil : category
+        clearParts(of: entry)
         if entry.reviewedAt == nil { entry.reviewedAt = .now }
         try save()
+    }
+
+    /// Records a split: the pieces must be from the kind's list and add up to
+    /// the bank amount exactly.
+    func decideSplit(_ entry: LedgerEntry, kind: Kind, sign: Int, parts: [(cents: Int, category: Category)]) throws {
+        guard kind != .transfer else { throw LedgerError.transferSplit }
+        guard parts.count >= 2, parts.allSatisfy({ $0.cents > 0 }) else { throw LedgerError.splitNeedsParts }
+        guard parts.allSatisfy({ $0.category.kind == kind.categoryKind }) else { throw LedgerError.wrongCategoryKind }
+        let total = parts.reduce(0) { $0 + $1.cents }
+        guard total == abs(entry.amountCents) else {
+            throw LedgerError.splitDoesNotAddUp(total: total, expected: abs(entry.amountCents))
+        }
+        entry.kind = kind
+        entry.sign = sign >= 0 ? 1 : -1
+        entry.category = nil
+        clearParts(of: entry)
+        for (index, part) in parts.enumerated() {
+            let made = SplitPart(cents: part.cents, order: index, category: part.category)
+            insert(made)
+            made.entry = entry
+        }
+        if entry.reviewedAt == nil { entry.reviewedAt = .now }
+        try save()
+    }
+
+    private func clearParts(of entry: LedgerEntry) {
+        for part in entry.parts { delete(part) }
+        entry.parts = []
     }
 
     // MARK: Categories
@@ -93,8 +122,8 @@ extension ModelContext {
         let raw = kind.rawValue
         let all = (try? fetch(FetchDescriptor<Category>(predicate: #Predicate { $0.kindRaw == raw }))) ?? []
         return all.sorted {
-            $0.entries.count != $1.entries.count
-                ? $0.entries.count > $1.entries.count
+            $0.uses != $1.uses
+                ? $0.uses > $1.uses
                 : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
     }
@@ -124,7 +153,7 @@ extension ModelContext {
 
     /// Only an unused category can go, so nothing reviewed loses its answer.
     func remove(_ category: Category) throws {
-        guard category.entries.isEmpty else { throw LedgerError.categoryInUse(category.name) }
+        guard category.uses == 0 else { throw LedgerError.categoryInUse(category.name) }
         delete(category)
         try save()
     }
@@ -144,6 +173,9 @@ nonisolated enum LedgerError: LocalizedError, Equatable {
     case needsCategory
     case wrongCategoryKind
     case categoryInUse(String)
+    case transferSplit
+    case splitNeedsParts
+    case splitDoesNotAddUp(total: Int, expected: Int)
 
     var errorDescription: String? {
         switch self {
@@ -154,6 +186,10 @@ nonisolated enum LedgerError: LocalizedError, Equatable {
         case .needsCategory: "Pick a category."
         case .wrongCategoryKind: "That category is on the other side of the ledger."
         case .categoryInUse(let n): "\(n) is used by transactions, so it can't be deleted."
+        case .transferSplit: "A transfer can't be split."
+        case .splitNeedsParts: "A split needs at least two parts, each more than zero."
+        case .splitDoesNotAddUp(let total, let expected):
+            "The parts add up to \(Money.text(total)), not \(Money.text(expected))."
         }
     }
 }

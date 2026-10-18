@@ -179,3 +179,85 @@ struct GoingBackTests {
         #expect(context.recentlyDecided().map(\.text) == ["C", "B", "A"])
     }
 }
+
+@Suite("Splitting a transaction")
+struct SplitTests {
+
+    let context: ModelContext
+    let entry: LedgerEntry
+    let groceries: Risu.Category
+    let household: Risu.Category
+
+    init() throws {
+        context = ModelContext(try RisuStore.container(inMemory: true))
+        let mapping = ColumnMapping(date: 0, description: 1, amount: .single(column: 2, moneyInIsPositive: true),
+                                    dateLayout: .monthDayYear)
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "a.csv", contents: Data("Date,Description,Amount\n10/04/2026,TARGET,-150.00".utf8), into: card)
+        entry = try #require(context.reviewQueue().first)
+        groceries = try context.category(named: "Groceries", kind: .expense)
+        household = try context.category(named: "Household", kind: .expense)
+    }
+
+    @Test("Parts must add up to the bank amount, to the cent")
+    func addsUp() throws {
+        #expect(throws: LedgerError.splitDoesNotAddUp(total: 14999, expected: 15000)) {
+            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (4999, household)])
+        }
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        #expect(entry.isSplit)
+        #expect(entry.category == nil)
+        #expect(entry.shares.map(\.contribution) == [10000, 5000])
+    }
+
+    @Test("A transfer can't be split, and a split needs two real parts")
+    func rules() {
+        #expect(throws: LedgerError.transferSplit) {
+            try context.decideSplit(entry, kind: .transfer, sign: 1, parts: [(10000, groceries), (5000, household)])
+        }
+        #expect(throws: LedgerError.splitNeedsParts) {
+            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(15000, groceries)])
+        }
+        #expect(throws: LedgerError.splitNeedsParts) {
+            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(15000, groceries), (0, household)])
+        }
+    }
+
+    @Test("Deciding it as one category again clears the parts")
+    func unsplit() throws {
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        try context.decide(entry, kind: .expense, sign: 1, category: groceries)
+        #expect(!entry.isSplit)
+        #expect(try context.fetchCount(FetchDescriptor<SplitPart>()) == 0)
+    }
+
+    @Test("Each part counts in its own category, and as a use of it")
+    func totalsAndUses() throws {
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        let items = entry.shares.map {
+            MonthTotals.Item(monthKey: entry.day.monthKey, kind: entry.kind, contribution: $0.contribution, category: $0.category?.name)
+        }
+        let totals = MonthTotals(month: "2026-10", items: items)
+        #expect(totals.expenses == 15000)
+        #expect(totals.expenseLines.map(\.name) == ["Groceries", "Household"])
+        #expect(household.uses == 1)
+        #expect(throws: LedgerError.categoryInUse("Household")) { try context.remove(household) }
+    }
+
+    @Test("A split row is still one bank row to the merge")
+    func merge() throws {
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        let source = try #require(entry.file?.source)
+        let again = try context.importFile(named: "b.csv", contents: Data("Date,Description,Amount\n10/04/2026,TARGET,-150.00".utf8), into: source)
+        #expect(again.new == 0)
+    }
+
+    @Test("While typing, the last part takes what's left")
+    func remainder() {
+        var drafts = [SplitDraft(text: "100", category: groceries), SplitDraft(category: household)]
+        #expect(drafts.cents(total: 15000) == [10000, 5000])
+        #expect(drafts.resolved(total: 15000)?.map(\.cents) == [10000, 5000])
+        drafts[0].text = "150"
+        #expect(drafts.resolved(total: 15000) == nil)
+    }
+}

@@ -62,6 +62,10 @@ struct EntryRow: View {
         guard let kind = entry.kind else { return "\(day) · To review" }
         if kind == .transfer { return "\(day) · Transfer" }
         let refund = entry.sign < 0 ? " (refund)" : ""
+        if entry.isSplit {
+            let names = entry.parts.sorted { $0.order < $1.order }.compactMap { $0.category?.name }
+            return "\(day) · Split: \(names.joined(separator: ", "))\(refund)"
+        }
         return "\(day) · \(entry.category?.name ?? kind.title)\(refund)"
     }
 }
@@ -73,8 +77,7 @@ struct EditEntrySheet: View {
     @State private var kind: Kind
     @State private var sign: Int
     @State private var category: Category?
-    @State private var adding = false
-    @State private var newName = ""
+    @State private var split: [SplitDraft]
     @State private var problem: String?
 
     init(entry: LedgerEntry) {
@@ -82,6 +85,7 @@ struct EditEntrySheet: View {
         _kind = State(initialValue: entry.kind ?? (entry.amountCents < 0 ? .expense : .income))
         _sign = State(initialValue: entry.sign)
         _category = State(initialValue: entry.category)
+        _split = State(initialValue: .from(entry))
     }
 
     var body: some View {
@@ -93,7 +97,8 @@ struct EditEntrySheet: View {
                         Text("\(entry.day.title) · \(entry.amountCents < 0 ? "−" : "+")\(Money.text(entry.amountCents))")
                             .foregroundStyle(.secondary)
                     }
-                    DecisionControls(kind: $kind, sign: $sign, category: $category, addingCategory: $adding)
+                    DecisionControls(kind: $kind, sign: $sign, category: $category, split: $split,
+                                     total: abs(entry.amountCents))
                 }
                 .padding(20)
             }
@@ -104,21 +109,13 @@ struct EditEntrySheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         do {
-                            try context.decide(entry, kind: kind, sign: sign, category: category)
-                            Telemetry.shared.log("edited", ["kind": kind.rawValue, "category": category?.name ?? ""])
+                            try context.record(entry, kind: kind, sign: sign, category: category, split: split)
+                            Telemetry.shared.log("edited", ["kind": kind.rawValue, "parts": "\(max(split.count, 1))"])
                             dismiss()
                         } catch { problem = error.localizedDescription }
                     }
-                    .disabled(kind != .transfer && category == nil)
+                    .disabled(!decisionIsComplete(kind: kind, category: category, split: split, total: abs(entry.amountCents)))
                 }
-            }
-            .alert("New category", isPresented: $adding) {
-                TextField("Name", text: $newName)
-                Button("Add") {
-                    if let side = kind.categoryKind { category = try? context.category(named: newName, kind: side) }
-                    newName = ""
-                }
-                Button("Cancel", role: .cancel) { newName = "" }
             }
             .alert("Can't save that", isPresented: .constant(problem != nil)) {
                 Button("OK") { problem = nil }
@@ -147,7 +144,7 @@ struct CategoriesScreen: View {
                                 newName = category.name
                                 renaming = category
                             } label: {
-                                LabeledContent(category.name, value: "\(category.entries.count)")
+                                LabeledContent(category.name, value: "\(category.uses)")
                             }
                             .buttonStyle(.plain)
                             .swipeActions {
@@ -203,9 +200,11 @@ struct OverviewScreen: View {
 
     private var totals: MonthTotals {
         guard let month = month ?? months.first else { return MonthTotals() }
-        return MonthTotals(month: month, items: entries.map {
-            MonthTotals.Item(monthKey: $0.day.monthKey, kind: $0.kind, contribution: $0.contribution,
-                             category: $0.category?.name)
+        return MonthTotals(month: month, items: entries.flatMap { entry in
+            entry.shares.map {
+                MonthTotals.Item(monthKey: entry.day.monthKey, kind: entry.kind, contribution: $0.contribution,
+                                 category: $0.category?.name)
+            }
         })
     }
 

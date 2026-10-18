@@ -104,8 +104,7 @@ struct ReviewCard: View {
     @State private var kind: Kind
     @State private var sign: Int
     @State private var category: Category?
-    @State private var addingCategory = false
-    @State private var newName = ""
+    @State private var split: [SplitDraft]
     @State private var problem: String?
     @State private var shown = Date.now
 
@@ -122,6 +121,7 @@ struct ReviewCard: View {
         _kind = State(initialValue: entry.kind ?? (entry.amountCents < 0 ? .expense : .income))
         _sign = State(initialValue: entry.kind == nil ? 1 : entry.sign)
         _category = State(initialValue: entry.category)
+        _split = State(initialValue: .from(entry))
     }
 
     var body: some View {
@@ -130,17 +130,12 @@ struct ReviewCard: View {
                 VStack(alignment: .leading, spacing: 22) {
                     if revisiting { revisitBanner }
                     summary
-                    DecisionControls(kind: $kind, sign: $sign, category: $category,
-                                     addingCategory: $addingCategory)
+                    DecisionControls(kind: $kind, sign: $sign, category: $category, split: $split,
+                                     total: abs(entry.amountCents))
                 }
                 .padding(20)
             }
             nextButton
-        }
-        .alert("New \(kind.categoryKind?.title.lowercased() ?? "") category", isPresented: $addingCategory) {
-            TextField("Name", text: $newName)
-            Button("Add") { addCategory() }
-            Button("Cancel", role: .cancel) { newName = ""; Telemetry.shared.log("new-category-cancelled") }
         }
         .alert("Can't save that", isPresented: .constant(problem != nil)) {
             Button("OK") { problem = nil }
@@ -202,30 +197,20 @@ struct ReviewCard: View {
                     .frame(maxWidth: .infinity, minHeight: 34)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(kind != .transfer && category == nil)
+            .disabled(!decisionIsComplete(kind: kind, category: category, split: split, total: abs(entry.amountCents)))
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(.bar)
     }
 
-    private func addCategory() {
-        guard let side = kind.categoryKind else { return }
-        do {
-            category = try context.category(named: newName, kind: side)
-            Telemetry.shared.log("new-category", ["name": category?.name ?? "", "kind": side.rawValue])
-        } catch {
-            problem = error.localizedDescription
-        }
-        newName = ""
-    }
-
     private func save() {
         do {
-            try context.decide(entry, kind: kind, sign: sign, category: category)
+            try context.record(entry, kind: kind, sign: sign, category: category, split: split)
             Telemetry.shared.log("decided", [
                 "kind": kind.rawValue, "sign": sign > 0 ? "adds" : "subtracts",
-                "category": category?.name ?? "",
+                "category": split.isEmpty ? (category?.name ?? "") : split.compactMap { $0.category?.name }.joined(separator: " + "),
+                "parts": "\(max(split.count, 1))",
                 "seconds": String(format: "%.1f", Date.now.timeIntervalSince(shown)),
                 "remaining": "\(revisiting ? remaining : remaining - 1)",
                 "revisit": "\(revisiting)",
@@ -238,30 +223,95 @@ struct ReviewCard: View {
     }
 }
 
-/// Kind, sign and category: the same controls in the review and when fixing a
-/// transaction later.
+/// One piece of a split, while it's being typed.
+struct SplitDraft: Identifiable, Equatable {
+    let id = UUID()
+    var text = ""
+    var category: Category?
+
+    static func == (a: SplitDraft, b: SplitDraft) -> Bool {
+        a.id == b.id && a.text == b.text && a.category === b.category
+    }
+}
+
+extension Array where Element == SplitDraft {
+    /// Every piece's cents: the ones typed, and the last takes what's left.
+    func cents(total: Int) -> [Int] {
+        guard !isEmpty else { return [] }
+        let typed = dropLast().map { Money.cents(from: $0.text).map(abs) ?? 0 }
+        return typed + [total - typed.reduce(0, +)]
+    }
+
+    /// The pieces ready to save, or nil while one is missing or empty.
+    func resolved(total: Int) -> [(cents: Int, category: Category)]? {
+        guard count >= 2 else { return nil }
+        let amounts = cents(total: total)
+        var out: [(cents: Int, category: Category)] = []
+        for (draft, cents) in zip(self, amounts) {
+            guard cents > 0, let category = draft.category else { return nil }
+            out.append((cents, category))
+        }
+        return out
+    }
+
+    static func from(_ entry: LedgerEntry) -> [SplitDraft] {
+        entry.parts.sorted { $0.order < $1.order }.map {
+            SplitDraft(text: String(format: "%d.%02d", $0.cents / 100, $0.cents % 100), category: $0.category)
+        }
+    }
+}
+
+/// What a decision needs before it can be saved.
+func decisionIsComplete(kind: Kind, category: Category?, split: [SplitDraft], total: Int) -> Bool {
+    if kind == .transfer { return true }
+    return split.isEmpty ? category != nil : split.resolved(total: total) != nil
+}
+
+extension ModelContext {
+    /// Saves whichever the controls hold: a split or a single answer.
+    func record(_ entry: LedgerEntry, kind: Kind, sign: Int, category: Category?, split: [SplitDraft]) throws {
+        if kind != .transfer, !split.isEmpty {
+            guard let parts = split.resolved(total: abs(entry.amountCents)) else { throw LedgerError.splitNeedsParts }
+            try decideSplit(entry, kind: kind, sign: sign, parts: parts)
+        } else {
+            try decide(entry, kind: kind, sign: sign, category: category)
+        }
+    }
+}
+
+/// Kind, sign and category, or a split into categories: the same controls in
+/// the review and when fixing a transaction later.
 struct DecisionControls: View {
     @Binding var kind: Kind
     @Binding var sign: Int
     @Binding var category: Category?
-    @Binding var addingCategory: Bool
+    @Binding var split: [SplitDraft]
+    /// The bank amount, positive, which a split's pieces must add up to.
+    let total: Int
     @Environment(\.modelContext) private var context
+    @State private var active = 0
+    @State private var adding = false
     @State private var renaming: Category?
     @State private var newName = ""
     @State private var problem: String?
+    @FocusState private var focused: UUID?
+
+    private var splitting: Bool { !split.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 8) {
-                Label("What is it?", systemImage: "questionmark.circle").font(.headline).labelStyle(.titleOnly)
+                Text("What is it?").font(.headline)
                 Picker("Kind", selection: $kind) {
                     ForEach(Kind.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .controlSize(.large)
                 .onChange(of: kind) { old, new in
-                    // The chip picked belongs to the other list.
+                    // Chips picked belong to the other list.
                     if category?.kind != new.categoryKind { category = nil }
+                    for i in split.indices where split[i].category?.kind != new.categoryKind { split[i].category = nil }
+                    if new == .transfer { split = [] }
                     Telemetry.shared.log("kind", ["from": old.rawValue, "to": new.rawValue])
                 }
             }
@@ -277,34 +327,37 @@ struct DecisionControls: View {
                     .onChange(of: sign) { _, new in Telemetry.shared.log("sign", ["to": new > 0 ? "adds" : "subtracts"]) }
                 }
 
+                if splitting { splitEditor }
+
                 if let side = kind.categoryKind {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Category").font(.headline)
+                        HStack {
+                            Text(splitting ? "Category for part \(active + 1)" : "Category").font(.headline)
+                            Spacer()
+                            if !splitting {
+                                Button("Split", systemImage: "square.split.2x1") { startSplit() }
+                                    .font(.subheadline)
+                            }
+                        }
                         ChipFlow(spacing: 8) {
                             ForEach(context.categories(side)) { chip in
-                                Chip(title: chip.name, selected: chip === category) {
-                                    category = chip
-                                    Telemetry.shared.log("chip", ["name": chip.name])
-                                }
-                                // A typo in + New is fixed where it was made.
-                                .contextMenu {
-                                    Button("Rename", systemImage: "pencil") {
-                                        newName = chip.name
-                                        renaming = chip
-                                        Telemetry.shared.log("chip-menu", ["action": "rename"])
-                                    }
-                                    if chip.entries.isEmpty {
-                                        Button("Delete", systemImage: "trash", role: .destructive) {
-                                            if category === chip { category = nil }
-                                            do { try context.remove(chip); Telemetry.shared.log("chip-menu", ["action": "delete"]) }
-                                            catch { problem = error.localizedDescription }
+                                Chip(title: chip.name, selected: selected(chip)) { pick(chip) }
+                                    // A typo in + New is fixed where it was made.
+                                    .contextMenu {
+                                        Button("Rename", systemImage: "pencil") {
+                                            newName = chip.name
+                                            renaming = chip
+                                            Telemetry.shared.log("chip-menu", ["action": "rename"])
+                                        }
+                                        if chip.uses == 0 {
+                                            Button("Delete", systemImage: "trash", role: .destructive) { remove(chip) }
                                         }
                                     }
-                                }
                             }
                             Chip(title: "+ New", selected: false, dashed: true) {
                                 Telemetry.shared.log("button", ["name": "new-category"])
-                                addingCategory = true
+                                newName = ""
+                                adding = true
                             }
                         }
                     }
@@ -313,6 +366,11 @@ struct DecisionControls: View {
                 Text("Money moving between your own accounts. It counts as neither income nor spending, and needs no category.")
                     .font(.callout).foregroundStyle(.secondary)
             }
+        }
+        .alert("New \(kind.categoryKind?.title.lowercased() ?? "") category", isPresented: $adding) {
+            TextField("Name", text: $newName)
+            Button("Add") { addCategory() }
+            Button("Cancel", role: .cancel) { Telemetry.shared.log("new-category-cancelled") }
         }
         .alert("Rename category", isPresented: .constant(renaming != nil)) {
             TextField("Name", text: $newName)
@@ -328,6 +386,142 @@ struct DecisionControls: View {
         .alert("Can't do that", isPresented: .constant(problem != nil)) {
             Button("OK") { problem = nil }
         } message: { Text(problem ?? "") }
+    }
+
+    // MARK: Splitting
+
+    private var splitEditor: some View {
+        let amounts = split.cents(total: total)
+        let left = amounts.last ?? 0
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Split \(Money.text(total))").font(.headline)
+                Spacer()
+                Button("Don't split") {
+                    category = split.first?.category
+                    split = []
+                    Telemetry.shared.log("split-cancelled")
+                }
+                .font(.subheadline)
+            }
+            ForEach(Array(split.enumerated()), id: \.element.id) { index, draft in
+                HStack(spacing: 10) {
+                    Button { active = index } label: {
+                        HStack {
+                            Text("\(index + 1)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                            Text(draft.category?.name ?? "Pick a category")
+                                .foregroundStyle(draft.category == nil ? Color.secondary : Color.primary)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(index == active ? Color.accentColor.opacity(0.16) : Color(.secondarySystemFill),
+                                    in: RoundedRectangle(cornerRadius: 10))
+                        .overlay {
+                            if index == active { RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor, lineWidth: 1.5) }
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    if index == split.count - 1 {
+                        Text(Money.text(left))
+                            .monospacedDigit()
+                            .foregroundStyle(left > 0 ? Color.secondary : Color.red)
+                            .frame(width: 96, alignment: .trailing)
+                    } else {
+                        TextField("0.00", text: $split[index].text)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                            .focused($focused, equals: draft.id)
+                            .frame(width: 96)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 8)
+                            .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    if split.count > 2 {
+                        Button("Remove part", systemImage: "minus.circle") { removePart(index) }
+                            .labelStyle(.iconOnly)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            HStack {
+                Button("Add part", systemImage: "plus") { addPart() }
+                    .font(.subheadline)
+                Spacer()
+                if left <= 0 {
+                    Text("Parts add up to more than \(Money.text(total))")
+                        .font(.caption).foregroundStyle(.red)
+                } else {
+                    Text("The last part gets what's left").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { focused = nil }
+            }
+        }
+    }
+
+    private func startSplit() {
+        split = [SplitDraft(category: category), SplitDraft()]
+        active = category == nil ? 0 : 1
+        focused = split[0].id
+        Telemetry.shared.log("split-started")
+    }
+
+    private func addPart() {
+        // The new part goes before the last, which keeps taking the rest.
+        split.insert(SplitDraft(), at: split.count - 1)
+        active = split.count - 2
+        focused = split[active].id
+        Telemetry.shared.log("split-part-added", ["parts": "\(split.count)"])
+    }
+
+    private func removePart(_ index: Int) {
+        split.remove(at: index)
+        active = min(active, split.count - 1)
+        Telemetry.shared.log("split-part-removed", ["parts": "\(split.count)"])
+    }
+
+    // MARK: Chips
+
+    private func selected(_ chip: Category) -> Bool {
+        splitting ? (split.indices.contains(active) && split[active].category === chip) : chip === category
+    }
+
+    private func pick(_ chip: Category) {
+        if splitting {
+            guard split.indices.contains(active) else { return }
+            split[active].category = chip
+            // On to the next part still waiting for one.
+            if let next = split.indices.first(where: { split[$0].category == nil }) { active = next }
+        } else {
+            category = chip
+        }
+        Telemetry.shared.log("chip", ["name": chip.name, "split": "\(splitting)"])
+    }
+
+    private func addCategory() {
+        guard let side = kind.categoryKind else { return }
+        do {
+            let made = try context.category(named: newName, kind: side)
+            pick(made)
+            Telemetry.shared.log("new-category", ["name": made.name, "kind": side.rawValue])
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+
+    private func remove(_ chip: Category) {
+        if category === chip { category = nil }
+        for i in split.indices where split[i].category === chip { split[i].category = nil }
+        do { try context.remove(chip); Telemetry.shared.log("chip-menu", ["action": "delete"]) }
+        catch { problem = error.localizedDescription }
     }
 }
 
