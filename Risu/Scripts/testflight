@@ -3,11 +3,11 @@
 #
 #   Risu/Scripts/testflight
 #
-# Needs an App Store Connect API key, kept outside the repo:
+# Signs and uploads as the Apple ID signed in to Xcode (Settings ▸ Accounts), which
+# lets Xcode make the distribution certificate and profile itself. Without one,
+# an App Store Connect API key works instead, kept outside the repo:
 #   ~/.appstoreconnect/risu.env          KEY_ID=…  ISSUER_ID=…
 #   ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8   (mode 600)
-# The key also lets Xcode make the distribution certificate and profile itself,
-# so nothing has to be clicked in Xcode first.
 #
 # Each upload needs a build number higher than the last, so it's the time:
 # 202610181102 sorts after every earlier build without anything to remember.
@@ -15,19 +15,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$HOME/.appstoreconnect/risu.env"
-[[ -f "$CONFIG" ]] || { echo "Missing $CONFIG (KEY_ID=… and ISSUER_ID=…)" >&2; exit 1; }
-# shellcheck disable=SC1090
-source "$CONFIG"
-KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
-[[ -f "$KEY_PATH" ]] || { echo "Missing $KEY_PATH" >&2; exit 1; }
-
 BUILD=$(date +%Y%m%d%H%M)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-AUTH=(-allowProvisioningUpdates
-      -authenticationKeyPath "$KEY_PATH"
-      -authenticationKeyID "$KEY_ID"
-      -authenticationKeyIssuerID "$ISSUER_ID")
+
+AUTH=(-allowProvisioningUpdates)
+if [[ -f "$CONFIG" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+    KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+    [[ -f "$KEY_PATH" ]] || { echo "Missing $KEY_PATH" >&2; exit 1; }
+    AUTH+=(-authenticationKeyPath "$KEY_PATH"
+           -authenticationKeyID "$KEY_ID"
+           -authenticationKeyIssuerID "$ISSUER_ID")
+fi
 
 cat > "$WORK/ExportOptions.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -43,14 +44,14 @@ cat > "$WORK/ExportOptions.plist" <<EOF
 </plist>
 EOF
 
-echo "Archiving build $BUILD…"
+echo "Archiving build ${BUILD}…"
 xcodebuild archive -project "$ROOT/Risu.xcodeproj" -scheme Risu \
     -destination 'generic/platform=iOS' -archivePath "$WORK/Risu.xcarchive" \
-    CURRENT_PROJECT_VERSION="$BUILD" "${AUTH[@]}" -quiet
+    CURRENT_PROJECT_VERSION="${BUILD}" "${AUTH[@]}" -quiet
 
 echo "Uploading…"
 xcodebuild -exportArchive -archivePath "$WORK/Risu.xcarchive" \
     -exportOptionsPlist "$WORK/ExportOptions.plist" -exportPath "$WORK/export" \
     "${AUTH[@]}" -quiet
 
-echo "Uploaded build $BUILD. It shows in TestFlight once App Store Connect finishes processing (usually 5–15 minutes)."
+echo "Uploaded build ${BUILD}. It shows in TestFlight once App Store Connect finishes processing (usually 5–15 minutes)."
