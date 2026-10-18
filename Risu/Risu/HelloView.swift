@@ -14,8 +14,13 @@ struct HelloView: View {
 
     var body: some View {
         VStack(spacing: 12) {
+            Text("🐿️")
+                .font(.system(size: 64))
             Text("Hello, Risu")
                 .font(.largeTitle.weight(.bold))
+            Text("Shipped with the lid closed")
+                .font(.headline)
+                .foregroundStyle(.tint)
             Text(build)
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
