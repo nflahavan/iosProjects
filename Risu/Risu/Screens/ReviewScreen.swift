@@ -246,6 +246,9 @@ struct DecisionControls: View {
     @Binding var category: Category?
     @Binding var addingCategory: Bool
     @Environment(\.modelContext) private var context
+    @State private var renaming: Category?
+    @State private var newName = ""
+    @State private var problem: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -283,6 +286,21 @@ struct DecisionControls: View {
                                     category = chip
                                     Telemetry.shared.log("chip", ["name": chip.name])
                                 }
+                                // A typo in + New is fixed where it was made.
+                                .contextMenu {
+                                    Button("Rename", systemImage: "pencil") {
+                                        newName = chip.name
+                                        renaming = chip
+                                        Telemetry.shared.log("chip-menu", ["action": "rename"])
+                                    }
+                                    if chip.entries.isEmpty {
+                                        Button("Delete", systemImage: "trash", role: .destructive) {
+                                            if category === chip { category = nil }
+                                            do { try context.remove(chip); Telemetry.shared.log("chip-menu", ["action": "delete"]) }
+                                            catch { problem = error.localizedDescription }
+                                        }
+                                    }
+                                }
                             }
                             Chip(title: "+ New", selected: false, dashed: true) {
                                 Telemetry.shared.log("button", ["name": "new-category"])
@@ -296,6 +314,20 @@ struct DecisionControls: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
+        .alert("Rename category", isPresented: .constant(renaming != nil)) {
+            TextField("Name", text: $newName)
+            Button("Save") {
+                if let renaming {
+                    do { try context.rename(renaming, to: newName); Telemetry.shared.log("category-renamed", ["from": "chip"]) }
+                    catch { problem = error.localizedDescription }
+                }
+                renaming = nil
+            }
+            Button("Cancel", role: .cancel) { renaming = nil }
+        }
+        .alert("Can't do that", isPresented: .constant(problem != nil)) {
+            Button("OK") { problem = nil }
+        } message: { Text(problem ?? "") }
     }
 }
 
