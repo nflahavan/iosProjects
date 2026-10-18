@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Lets CloudKit's silent pushes wake the app to import changes while it
+	     isn't on screen. Risu doesn't declare this; the demo does, so the
+	     difference can be watched. -->
+	<key>UIBackgroundModes</key>
+	<array><string>remote-notification</string></array>
+</dict>
+</plist>

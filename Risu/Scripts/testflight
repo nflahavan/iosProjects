@@ -1,0 +1,56 @@
+#!/bin/bash
+# Archive Risu and upload it to App Store Connect, where it becomes a TestFlight build.
+#
+#   Risu/Scripts/testflight
+#
+# Needs an App Store Connect API key, kept outside the repo:
+#   ~/.appstoreconnect/risu.env          KEY_ID=…  ISSUER_ID=…
+#   ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8   (mode 600)
+# The key also lets Xcode make the distribution certificate and profile itself,
+# so nothing has to be clicked in Xcode first.
+#
+# Each upload needs a build number higher than the last, so it's the time:
+# 202610181102 sorts after every earlier build without anything to remember.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG="$HOME/.appstoreconnect/risu.env"
+[[ -f "$CONFIG" ]] || { echo "Missing $CONFIG (KEY_ID=… and ISSUER_ID=…)" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$CONFIG"
+KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+[[ -f "$KEY_PATH" ]] || { echo "Missing $KEY_PATH" >&2; exit 1; }
+
+BUILD=$(date +%Y%m%d%H%M)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+AUTH=(-allowProvisioningUpdates
+      -authenticationKeyPath "$KEY_PATH"
+      -authenticationKeyID "$KEY_ID"
+      -authenticationKeyIssuerID "$ISSUER_ID")
+
+cat > "$WORK/ExportOptions.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key><string>app-store-connect</string>
+    <key>destination</key><string>upload</string>
+    <key>teamID</key><string>9K49YB68EN</string>
+    <key>signingStyle</key><string>automatic</string>
+    <key>uploadSymbols</key><true/>
+</dict>
+</plist>
+EOF
+
+echo "Archiving build $BUILD…"
+xcodebuild archive -project "$ROOT/Risu.xcodeproj" -scheme Risu \
+    -destination 'generic/platform=iOS' -archivePath "$WORK/Risu.xcarchive" \
+    CURRENT_PROJECT_VERSION="$BUILD" "${AUTH[@]}" -quiet
+
+echo "Uploading…"
+xcodebuild -exportArchive -archivePath "$WORK/Risu.xcarchive" \
+    -exportOptionsPlist "$WORK/ExportOptions.plist" -exportPath "$WORK/export" \
+    "${AUTH[@]}" -quiet
+
+echo "Uploaded build $BUILD. It shows in TestFlight once App Store Connect finishes processing (usually 5–15 minutes)."
