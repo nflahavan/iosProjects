@@ -68,13 +68,8 @@ struct ImportFlow: View {
         let others = sources.filter { $0.header != table.header }
         return List {
             Section {
-                CSVGrid(table: table, rows: 12)
-                    .frame(height: 220)
-                    .listRowInsets(EdgeInsets())
-            } header: {
-                Text("\(table.rows.count) rows")
-            } footer: {
                 Text("Which account is this from?")
+                    .foregroundStyle(.secondary)
             }
             if !matching.isEmpty {
                 Section("Matches this file") {
@@ -103,6 +98,9 @@ struct ImportFlow: View {
                     Text("These sources expect other columns. If your bank changed its export, set up a new source for it.")
                 }
             }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            FilePeek(table: table) { CSVGrid(table: table, rows: 12) }
         }
     }
 
@@ -197,15 +195,6 @@ struct MappingScreen: View {
 
     var body: some View {
         Form {
-            Section {
-                CSVGrid(table: table, roles: roles, choices: roleChoices, assign: assign)
-                    .frame(height: 260)
-                    .listRowInsets(EdgeInsets())
-            } header: {
-                Text("Your file · \(table.rows.count) rows")
-            } footer: {
-                Text("Tap a column's name to use it for the date, description or amount.")
-            }
             Section("Name") {
                 TextField("e.g. Chase Sapphire", text: $name)
             }
@@ -256,6 +245,11 @@ struct MappingScreen: View {
                 }
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            FilePeek(table: table, hint: "Tap a column's name to use it for the date, description or amount.") {
+                CSVGrid(table: table, roles: roles, choices: roleChoices, assign: assign)
+            }
+        }
         .navigationTitle("New source")
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
@@ -302,5 +296,31 @@ struct MappingScreen: View {
         } catch {
             problem = error.localizedDescription
         }
+    }
+}
+
+/// The file, pinned above a screen's controls, edge to edge.
+struct FilePeek<Grid: View>: View {
+    let table: CSVTable
+    var hint: String?
+    @ViewBuilder let grid: Grid
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Your file · \(table.rows.count) rows")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            grid.frame(height: 200)
+            if let hint {
+                Text(hint)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+            }
+        }
+        .background(.bar)
     }
 }

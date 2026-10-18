@@ -38,8 +38,7 @@ struct CSVGrid: View {
         }
         .scrollIndicators(.visible)
         .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(.separator)))
+        .overlay(alignment: .bottom) { Divider() }
     }
 
     @ViewBuilder
