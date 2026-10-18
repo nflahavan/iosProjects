@@ -1,0 +1,156 @@
+import Foundation
+import SwiftData
+import Testing
+@testable import Risu
+
+/// The store end to end, with invented files.
+@Suite("Ledger")
+struct LedgerTests {
+
+    let context: ModelContext
+    let mapping = ColumnMapping(date: 0, description: 1, amount: .single(column: 2, moneyInIsPositive: true),
+                                dateLayout: .monthDayYear)
+
+    init() throws {
+        context = ModelContext(try RisuStore.container(inMemory: true))
+    }
+
+    func csv(_ rows: String) -> Data { Data("Date,Description,Amount\n\(rows)".utf8) }
+
+    @Test("A source's second file brings in only what's new")
+    func overlappingFiles() throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        let first = try context.importFile(named: "sept.csv", contents: csv("""
+        09/30/2026,COFFEE,-4.50
+        10/01/2026,GROCER,-20.00
+        """), into: card)
+        #expect(first == ImportSummary(new: 2, alreadyHere: 0, unreadable: 0))
+
+        let second = try context.importFile(named: "oct.csv", contents: csv("""
+        10/01/2026,GROCER,-20.00
+        10/02/2026,GAS,-30.00
+        oops,BAD,1
+        """), into: card)
+        #expect(second == ImportSummary(new: 1, alreadyHere: 1, unreadable: 1))
+        #expect(context.reviewQueue().map(\.text) == ["COFFEE", "GROCER", "GAS"])
+    }
+
+    @Test("Another source's identical row isn't a duplicate")
+    func perSource() throws {
+        let header = ["Date", "Description", "Amount"]
+        let a = try context.addSource(name: "Checking", header: header, mapping: mapping)
+        let b = try context.addSource(name: "Card", header: header, mapping: mapping)
+        let row = csv("10/05/2026,CARD PAYMENT,-500.00")
+        try context.importFile(named: "a.csv", contents: row, into: a)
+        #expect(try context.importFile(named: "b.csv", contents: row, into: b).new == 1)
+    }
+
+    @Test("A file with other columns is refused, and nothing is stored")
+    func shape() throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        #expect(throws: LedgerError.shapeMismatch("Card")) {
+            try context.importFile(named: "x.csv", contents: Data("Posted,Payee,Debit\n1,2,3".utf8), into: card)
+        }
+        #expect(try context.fetchCount(FetchDescriptor<ImportedFile>()) == 0)
+    }
+
+    @Test("Two sources can't share a name, whatever the case")
+    func sourceNames() throws {
+        _ = try context.addSource(name: "Card", header: [], mapping: mapping)
+        #expect(throws: LedgerError.sourceExists("card")) {
+            _ = try context.addSource(name: "card", header: [], mapping: mapping)
+        }
+    }
+
+    @Test("Deciding needs a category, from the matching list, except for a transfer")
+    func decideRules() throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "a.csv", contents: csv("10/01/2026,X,-1.00"), into: card)
+        let entry = try #require(context.reviewQueue().first)
+        let salary = try context.category(named: "Salary", kind: .income)
+
+        #expect(throws: LedgerError.needsCategory) { try context.decide(entry, kind: .expense, sign: 1, category: nil) }
+        #expect(throws: LedgerError.wrongCategoryKind) { try context.decide(entry, kind: .expense, sign: 1, category: salary) }
+        try context.decide(entry, kind: .transfer, sign: 1, category: salary)
+        #expect(entry.kind == .transfer)
+        #expect(entry.category == nil)
+        #expect(context.reviewQueue().isEmpty)
+    }
+
+    @Test("Chips come most-used first, then by name")
+    func chipOrder() throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "a.csv", contents: csv("""
+        10/01/2026,A,-1.00
+        10/02/2026,B,-1.00
+        10/03/2026,C,-1.00
+        """), into: card)
+        let dining = try context.category(named: "Dining", kind: .expense)
+        let groceries = try context.category(named: "Groceries", kind: .expense)
+        _ = try context.category(named: "Auto", kind: .expense)
+        for entry in context.reviewQueue() {
+            try context.decide(entry, kind: .expense, sign: 1, category: entry.text == "A" ? dining : groceries)
+        }
+        #expect(context.categories(.expense).map(\.name) == ["Groceries", "Dining", "Auto"])
+    }
+
+    @Test("Adding a category that exists hands back the existing one")
+    func categoryReuse() throws {
+        let one = try context.category(named: "Groceries", kind: .expense)
+        let two = try context.category(named: " groceries ", kind: .expense)
+        #expect(one === two)
+        #expect(try context.category(named: "Groceries", kind: .income) !== one)
+    }
+
+    @Test("A category in use can't be deleted")
+    func removeInUse() throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "a.csv", contents: csv("10/01/2026,X,-1.00"), into: card)
+        let gifts = try context.category(named: "Gifts", kind: .expense)
+        try context.decide(try #require(context.reviewQueue().first), kind: .expense, sign: 1, category: gifts)
+        #expect(throws: LedgerError.categoryInUse("Gifts")) { try context.remove(gifts) }
+    }
+}
+
+@Suite("Month totals")
+struct MonthTotalsTests {
+
+    typealias Item = MonthTotals.Item
+
+    @Test("A refund takes away from its category; transfers and unreviewed rows don't count")
+    func totals() {
+        let items = [
+            Item(monthKey: "2026-10", kind: .income, contribution: 300000, category: "Salary"),
+            Item(monthKey: "2026-10", kind: .expense, contribution: 10000, category: "Groceries"),
+            Item(monthKey: "2026-10", kind: .expense, contribution: -2500, category: "Groceries"),
+            Item(monthKey: "2026-10", kind: .expense, contribution: 4000, category: "Dining"),
+            Item(monthKey: "2026-10", kind: .transfer, contribution: 50000, category: nil),
+            Item(monthKey: "2026-10", kind: nil, contribution: 999, category: nil),
+            Item(monthKey: "2026-09", kind: .expense, contribution: 777, category: "Dining"),
+        ]
+        let t = MonthTotals(month: "2026-10", items: items)
+        #expect(t.income == 300000)
+        #expect(t.expenses == 11500)
+        #expect(t.net == 288500)
+        #expect(t.expenseLines.map(\.name) == ["Groceries", "Dining"])
+        #expect(t.expenseLines.first?.cents == 7500)
+        #expect(t.unreviewed == 1)
+    }
+
+    @Test("A transaction's contribution follows its sign, not the bank's")
+    func contribution() throws {
+        let context = ModelContext(try RisuStore.container(inMemory: true))
+        let source = Source(name: "S", header: [], mapping: ColumnMapping(date: 0, description: 0,
+            amount: .single(column: 0, moneyInIsPositive: true), dateLayout: .monthDayYear))
+        context.insert(source)
+        let file = ImportedFile(name: "f", contents: Data(), source: source)
+        context.insert(file)
+        let refund = LedgerEntry(parsed: ParsedRow(day: Day(year: 2026, month: 10, day: 1), text: "R", amountCents: 2500),
+                                 row: 0, file: file)
+        context.insert(refund)
+        refund.sign = -1
+        #expect(refund.contribution == -2500)
+        refund.sign = 1
+        #expect(refund.contribution == 2500)
+    }
+}

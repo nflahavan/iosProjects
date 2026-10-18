@@ -24,8 +24,17 @@ decisions still open, are on the diagram at
 
 ```bash
 cd Risu
-xcodebuild -scheme Risu -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' build
+xcodebuild test -scheme Risu -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0'   # ~10s
 Scripts/testflight      # archive and upload a TestFlight build, as the Apple ID signed in to Xcode
 ```
 
 Targets iOS 27.0, iPhone only, Swift 6 with the main actor as the default isolation.
+Parallel testing is off in the scheme: it clones the simulator, which made a 0.1s suite
+take minutes.
+
+## Telemetry
+
+The app logs screens, taps and choices (never descriptions or amounts) as JSON lines,
+one file per launch, and copies them to its iCloud Drive folder. On this Mac:
+`~/Library/Mobile Documents/iCloud~com~nikflahavan~risu/Documents/Telemetry/`.
+Settings ▸ Export in the app is the fallback.

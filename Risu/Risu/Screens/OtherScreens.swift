@@ -1,0 +1,307 @@
+import Charts
+import SwiftData
+import SwiftUI
+
+/// Everything imported, newest first, to look over or fix.
+struct TransactionsScreen: View {
+    @Query(sort: [SortDescriptor(\LedgerEntry.dayKey, order: .reverse), SortDescriptor(\LedgerEntry.row)])
+    private var entries: [LedgerEntry]
+    @State private var editing: LedgerEntry?
+
+    private var months: [(key: String, entries: [LedgerEntry])] {
+        Dictionary(grouping: entries, by: { $0.day.monthKey })
+            .sorted { $0.key > $1.key }
+            .map { ($0.key, $0.value) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(months, id: \.key) { month in
+                    Section(monthTitle(month.key)) {
+                        ForEach(month.entries) { entry in
+                            Button { editing = entry; Telemetry.shared.log("open-transaction", ["reviewed": "\(entry.isReviewed)"]) } label: {
+                                EntryRow(entry: entry)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .overlay {
+                if entries.isEmpty {
+                    ContentUnavailableView("No transactions", systemImage: "list.bullet",
+                                           description: Text("Import a CSV from the Review tab."))
+                }
+            }
+            .navigationTitle("Transactions")
+            .sheet(item: $editing) { EditEntrySheet(entry: $0) }
+            .screen("transactions")
+        }
+    }
+}
+
+struct EntryRow: View {
+    let entry: LedgerEntry
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.text).lineLimit(1)
+                Text(caption).font(.caption).foregroundStyle(entry.isReviewed ? Color.secondary : Color.orange)
+            }
+            Spacer()
+            Text((entry.amountCents < 0 ? "−" : "+") + Money.text(entry.amountCents))
+                .monospacedDigit()
+                .foregroundStyle(entry.amountCents < 0 ? Color.primary : Color.green)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var caption: String {
+        let day = entry.day.title
+        guard let kind = entry.kind else { return "\(day) · To review" }
+        if kind == .transfer { return "\(day) · Transfer" }
+        let refund = entry.sign < 0 ? " (refund)" : ""
+        return "\(day) · \(entry.category?.name ?? kind.title)\(refund)"
+    }
+}
+
+struct EditEntrySheet: View {
+    let entry: LedgerEntry
+    @Environment(\.modelContext) private var context
+    @Environment(\.dismiss) private var dismiss
+    @State private var kind: Kind
+    @State private var sign: Int
+    @State private var category: Category?
+    @State private var adding = false
+    @State private var newName = ""
+    @State private var problem: String?
+
+    init(entry: LedgerEntry) {
+        self.entry = entry
+        _kind = State(initialValue: entry.kind ?? (entry.amountCents < 0 ? .expense : .income))
+        _sign = State(initialValue: entry.sign)
+        _category = State(initialValue: entry.category)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.text).font(.title3.weight(.semibold))
+                        Text("\(entry.day.title) · \(entry.amountCents < 0 ? "−" : "+")\(Money.text(entry.amountCents))")
+                            .foregroundStyle(.secondary)
+                    }
+                    DecisionControls(kind: $kind, sign: $sign, category: $category, addingCategory: $adding)
+                }
+                .padding(20)
+            }
+            .navigationTitle(entry.isReviewed ? "Edit" : "Review")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        do {
+                            try context.decide(entry, kind: kind, sign: sign, category: category)
+                            Telemetry.shared.log("edited", ["kind": kind.rawValue, "category": category?.name ?? ""])
+                            dismiss()
+                        } catch { problem = error.localizedDescription }
+                    }
+                    .disabled(kind != .transfer && category == nil)
+                }
+            }
+            .alert("New category", isPresented: $adding) {
+                TextField("Name", text: $newName)
+                Button("Add") {
+                    if let side = kind.categoryKind { category = try? context.category(named: newName, kind: side) }
+                    newName = ""
+                }
+                Button("Cancel", role: .cancel) { newName = "" }
+            }
+            .alert("Can't save that", isPresented: .constant(problem != nil)) {
+                Button("OK") { problem = nil }
+            } message: { Text(problem ?? "") }
+            .screen("edit-transaction")
+        }
+    }
+}
+
+/// Both lists, how much each is used, and renaming or removing.
+struct CategoriesScreen: View {
+    @Environment(\.modelContext) private var context
+    @Query(sort: \Category.name) private var all: [Category]
+    @State private var renaming: Category?
+    @State private var newName = ""
+    @State private var adding: CategoryKind?
+    @State private var problem: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(CategoryKind.allCases) { side in
+                    Section {
+                        ForEach(context.categories(side)) { category in
+                            Button {
+                                newName = category.name
+                                renaming = category
+                            } label: {
+                                LabeledContent(category.name, value: "\(category.entries.count)")
+                            }
+                            .buttonStyle(.plain)
+                            .swipeActions {
+                                Button("Delete", role: .destructive) {
+                                    do { try context.remove(category); Telemetry.shared.log("category-deleted") }
+                                    catch { problem = error.localizedDescription }
+                                }
+                            }
+                        }
+                        Button("Add \(side.title.lowercased()) category") { newName = ""; adding = side }
+                    } header: { Text(side.title) }
+                }
+            }
+            .navigationTitle("Categories")
+            .alert("Rename", isPresented: .constant(renaming != nil)) {
+                TextField("Name", text: $newName)
+                Button("Save") {
+                    if let renaming {
+                        do { try context.rename(renaming, to: newName); Telemetry.shared.log("category-renamed") }
+                        catch { problem = error.localizedDescription }
+                    }
+                    renaming = nil
+                }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            }
+            .alert("New category", isPresented: .constant(adding != nil)) {
+                TextField("Name", text: $newName)
+                Button("Add") {
+                    if let adding {
+                        do { _ = try context.category(named: newName, kind: adding); Telemetry.shared.log("category-added", ["kind": adding.rawValue]) }
+                        catch { problem = error.localizedDescription }
+                    }
+                    adding = nil
+                }
+                Button("Cancel", role: .cancel) { adding = nil }
+            }
+            .alert("Can't do that", isPresented: .constant(problem != nil)) {
+                Button("OK") { problem = nil }
+            } message: { Text(problem ?? "") }
+            .screen("categories")
+        }
+    }
+}
+
+/// A month's income against its spending, and the categories side by side.
+struct OverviewScreen: View {
+    @Query private var entries: [LedgerEntry]
+    @State private var month: String?
+
+    private var months: [String] {
+        Array(Set(entries.map { $0.day.monthKey })).sorted(by: >)
+    }
+
+    private var totals: MonthTotals {
+        guard let month = month ?? months.first else { return MonthTotals() }
+        return MonthTotals(month: month, items: entries.map {
+            MonthTotals.Item(monthKey: $0.day.monthKey, kind: $0.kind, contribution: $0.contribution,
+                             category: $0.category?.name)
+        })
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                if months.isEmpty {
+                    ContentUnavailableView("Nothing yet", systemImage: "chart.bar",
+                                           description: Text("Import and review a CSV to see where the money went."))
+                } else {
+                    VStack(alignment: .leading, spacing: 24) {
+                        Picker("Month", selection: Binding(get: { month ?? months.first ?? "" },
+                                                           set: { month = $0; Telemetry.shared.log("month", ["to": $0]) })) {
+                            ForEach(months, id: \.self) { Text(monthTitle($0)).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+
+                        HStack(spacing: 12) {
+                            tile("Income", totals.income, .green)
+                            tile("Spending", totals.expenses, .primary)
+                            tile("Net", totals.net, totals.net >= 0 ? .green : .red, signed: true)
+                        }
+                        if totals.unreviewed > 0 {
+                            Label("\(totals.unreviewed) transactions this month aren't reviewed yet, so they aren't counted.",
+                                  systemImage: "rectangle.stack")
+                                .font(.callout).foregroundStyle(.orange)
+                        }
+                        bars("Spending by category", totals.expenseLines, Color.accentColor)
+                        bars("Income by category", totals.incomeLines, .green)
+                    }
+                    .padding(20)
+                }
+            }
+            .navigationTitle("Overview")
+            .screen("overview")
+        }
+    }
+
+    private func tile(_ title: String, _ cents: Int, _ color: Color, signed: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text((signed ? (cents < 0 ? "−" : "+") : "") + Money.text(cents))
+                .font(.headline.monospacedDigit()).foregroundStyle(color)
+                .minimumScaleFactor(0.6).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private func bars(_ title: String, _ lines: [MonthTotals.Line], _ color: Color) -> some View {
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline)
+                Chart(lines) { line in
+                    BarMark(x: .value("Amount", Double(line.cents) / 100), y: .value("Category", line.name))
+                        .foregroundStyle(color)
+                        .annotation(position: .trailing) {
+                            Text(Money.text(line.cents)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                }
+                .chartXAxis(.hidden)
+                .frame(height: CGFloat(lines.count) * 34 + 10)
+            }
+        }
+    }
+}
+
+/// Telemetry, and where it goes.
+struct SettingsScreen: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ShareLink(item: Telemetry.shared.fileURL) {
+                        Label("Export this session's log", systemImage: "square.and.arrow.up")
+                    }
+                } header: { Text("Usage log") } footer: {
+                    Text("Records screens, taps and choices, never a transaction's description or amount. It also copies itself to Risu's iCloud Drive folder.")
+                }
+                Section {
+                    LabeledContent("Version", value: "\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"))")
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .screen("settings")
+        }
+    }
+}
+
+func monthTitle(_ key: String) -> String {
+    guard let day = Day(key: key + "-01") else { return key }
+    var c = DateComponents(); c.year = day.year; c.month = day.month; c.day = 1
+    let date = Calendar(identifier: .gregorian).date(from: c) ?? .now
+    return date.formatted(.dateTime.month(.wide).year())
+}
