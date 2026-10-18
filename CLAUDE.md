@@ -24,7 +24,7 @@ decisions still open, are on the diagram at
 
 ```bash
 cd Risu
-xcodebuild -scheme Risu -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.1' build
+xcodebuild -scheme Risu -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0' build
 Scripts/testflight      # archive and upload a TestFlight build, as the Apple ID signed in to Xcode
 ```
 
