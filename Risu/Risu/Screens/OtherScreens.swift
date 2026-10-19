@@ -284,14 +284,18 @@ struct OverviewScreen: View {
 /// Telemetry, and where it goes.
 struct SettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var log = Telemetry.shared.exportAll()
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    ShareLink(item: Telemetry.shared.fileURL) {
-                        Label("Export this session's log", systemImage: "square.and.arrow.up")
+                    ShareLink(item: log) {
+                        Label("Export the usage log", systemImage: "square.and.arrow.up")
                     }
-                    .simultaneousGesture(TapGesture().onEnded { Telemetry.shared.log("export-log") })
+                    .simultaneousGesture(TapGesture().onEnded {
+                        Telemetry.shared.log("export-log")
+                        log = Telemetry.shared.exportAll()
+                    })
                 } header: { Text("Usage log") } footer: {
                     Text("Records screens, taps and choices, never a transaction's description or amount. It stays on this phone unless you export it.")
                 }

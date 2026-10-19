@@ -9,7 +9,9 @@ import UIKit
 /// stays out of it. Category and source names are in it; you made those up.
 ///
 /// Each launch writes its own file in the app's Documents. Settings ▸ Export
-/// hands it to the share sheet; nothing leaves the phone otherwise.
+/// joins them all into one file for the share sheet, since what you want to
+/// talk about usually happened a launch or two ago; nothing leaves the phone
+/// otherwise.
 @MainActor
 final class Telemetry {
     static let shared = Telemetry()
@@ -20,6 +22,7 @@ final class Telemetry {
     private(set) var screen = "launch"
     private var stack: [String] = []
     let fileURL: URL
+    private let folder = URL.documentsDirectory.appending(path: "Telemetry")
     private let session = UUID().uuidString.prefix(8)
     private var lines: [String] = []
     private let started = Date()
@@ -27,9 +30,20 @@ final class Telemetry {
     private init() {
         let stamp = Date.now.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false)
             .dateTimeSeparator(.standard).timeSeparator(.omitted))
-        let folder = URL.documentsDirectory.appending(path: "Telemetry")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         fileURL = folder.appending(path: "risu-\(stamp)-\(session).jsonl")
+    }
+
+    /// Every launch's log, oldest first, as one file. Each line names its
+    /// launch in `session`, so they stay apart when read.
+    func exportAll() -> URL {
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        // File names start with the launch time, so their order is time order.
+        let logs = files.filter { $0.pathExtension == "jsonl" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let joined = logs.compactMap { try? Data(contentsOf: $0) }.reduce(Data(), +)
+        let out = URL.temporaryDirectory.appending(path: "risu-log-\(Date.now.formatted(.iso8601.year().month().day())).jsonl")
+        try? joined.write(to: out, options: .atomic)
+        return out
     }
 
     func start() {
