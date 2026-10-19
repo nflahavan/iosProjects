@@ -35,6 +35,22 @@ struct LedgerTests {
         #expect(context.reviewQueue().map(\.text) == ["COFFEE", "GROCER", "GAS"])
     }
 
+    @Test("The queue and Back can stay within one account")
+    func oneAccount() throws {
+        let header = ["Date", "Description", "Amount"]
+        let card = try context.addSource(name: "Card", header: header, mapping: mapping)
+        let bank = try context.addSource(name: "Bank", header: header, mapping: mapping)
+        try context.importFile(named: "card.csv", contents: csv("09/30/2026,COFFEE,-4.50\n10/01/2026,GAS,-30.00"), into: card)
+        try context.importFile(named: "bank.csv", contents: csv("10/02/2026,RENT,-900.00"), into: bank)
+        #expect(context.reviewQueue().map(\.text) == ["COFFEE", "GAS", "RENT"])
+        #expect(context.reviewQueue(from: bank).map(\.text) == ["RENT"])
+
+        try context.decide(try #require(context.reviewQueue(from: bank).first), kind: .transfer, sign: 1, category: nil)
+        #expect(context.reviewQueue(from: bank).isEmpty)
+        #expect(context.recentlyDecided(from: bank).map(\.text) == ["RENT"])
+        #expect(context.recentlyDecided(from: card).isEmpty)
+    }
+
     @Test("Another source's identical row isn't a duplicate")
     func perSource() throws {
         let header = ["Date", "Description", "Amount"]

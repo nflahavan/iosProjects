@@ -53,9 +53,10 @@ extension ModelContext {
     // MARK: Reviewing
 
     /// Rows still to decide, oldest file first, in file order.
-    func reviewQueue() -> [LedgerEntry] {
+    /// Rows waiting, a file at a time in import order; one account's, or all.
+    func reviewQueue(from source: Source? = nil) -> [LedgerEntry] {
         let all = (try? fetch(FetchDescriptor<LedgerEntry>(predicate: #Predicate { $0.kindRaw == nil }))) ?? []
-        return all.sorted {
+        return all.filter { source == nil || $0.file?.source === source }.sorted {
             let a = $0.file?.importedAt ?? .distantPast, b = $1.file?.importedAt ?? .distantPast
             return a == b ? $0.row < $1.row : a < b
         }
@@ -63,12 +64,13 @@ extension ModelContext {
 
     /// Rows already decided, the most recently decided first: what the
     /// review's Back button steps through.
-    func recentlyDecided(limit: Int = 200) -> [LedgerEntry] {
+    func recentlyDecided(from source: Source? = nil, limit: Int = 200) -> [LedgerEntry] {
         var descriptor = FetchDescriptor<LedgerEntry>(
             predicate: #Predicate { $0.reviewedAt != nil },
             sortBy: [SortDescriptor(\.reviewedAt, order: .reverse)])
-        descriptor.fetchLimit = limit
-        return (try? fetch(descriptor)) ?? []
+        if source == nil { descriptor.fetchLimit = limit }
+        let decided = (try? fetch(descriptor)) ?? []
+        return Array(decided.filter { source == nil || $0.file?.source === source }.prefix(limit))
     }
 
     /// Records a decision. Changing one later keeps when it was first

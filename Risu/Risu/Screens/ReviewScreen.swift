@@ -8,57 +8,34 @@ struct ReviewScreen: View {
     @Binding var importFile: IncomingFile?
     @Environment(\.modelContext) private var context
     @Query(filter: #Predicate<LedgerEntry> { $0.kindRaw == nil }) private var waiting: [LedgerEntry]
+    @Query(sort: \Source.name) private var sources: [Source]
+    /// The account being reviewed, by name; empty is all of them.
+    @AppStorage("reviewSource") private var sourceName = ""
     @State private var picking = false
     @State private var showingSettings = false
     /// How many decided rows back from the queue you've stepped. 0 is the
     /// next new row.
     @State private var backSteps = 0
 
-    private var recent: [LedgerEntry] { context.recentlyDecided() }
+    private var source: Source? { sources.first { $0.name == sourceName } }
+    private var recent: [LedgerEntry] { context.recentlyDecided(from: source) }
+    private var left: Int { source.map { s in waiting.count { $0.file?.source === s } } ?? waiting.count }
 
     private var current: LedgerEntry? {
         if backSteps > 0 {
             let recent = recent
             return backSteps <= recent.count ? recent[backSteps - 1] : nil
         }
-        return context.reviewQueue().first
+        return context.reviewQueue(from: source).first
     }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if let entry = current {
-                    ReviewCard(entry: entry, remaining: waiting.count,
-                               revisiting: backSteps > 0,
-                               canGoBack: backSteps < recent.count,
-                               back: {
-                                   backSteps += 1
-                                   Telemetry.shared.log("back", ["steps": "\(backSteps)"])
-                               },
-                               returnToNew: {
-                                   Telemetry.shared.log("back-to-new", ["from": "\(backSteps)"])
-                                   backSteps = 0
-                               },
-                               saved: { if backSteps > 0 { backSteps -= 1 } })
-                        .id(entry.persistentModelID)
-                } else {
-                    ContentUnavailableView {
-                        Label("Nothing to review", systemImage: "checkmark.circle")
-                    } description: {
-                        Text("Import a CSV from your bank. Its new rows show up here one at a time.")
-                    } actions: {
-                        Button("Import CSV") { open() }
-                            .buttonStyle(.borderedProminent)
-                        if !recent.isEmpty {
-                            Button("Go back over reviewed rows") {
-                                backSteps = 1
-                                Telemetry.shared.log("back", ["steps": "1", "from": "empty"])
-                            }
-                        }
-                    }
-                }
+            VStack(spacing: 0) {
+                if sources.count > 1 { accountPicker }
+                card
             }
-            .navigationTitle(waiting.isEmpty ? "Review" : "Review · \(waiting.count) left")
+            .navigationTitle(left == 0 ? "Review" : "Review · \(left) left")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -82,6 +59,69 @@ struct ReviewScreen: View {
             }
             .sheet(isPresented: $showingSettings) { SettingsScreen() }
             .screen("review")
+        }
+    }
+
+    /// Which account's rows to go through. All of them is a file at a
+    /// time in import order; one account's is just its own.
+    private var accountPicker: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                accountChip("All", count: waiting.count, name: "")
+                ForEach(sources) { source in
+                    accountChip(source.name, count: waiting.count { $0.file?.source === source }, name: source.name)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+        }
+        .scrollIndicators(.hidden)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func accountChip(_ title: String, count: Int, name: String) -> some View {
+        Chip(title: "\(title)  \(count)", selected: sourceName == name) {
+            guard sourceName != name else { return }
+            sourceName = name
+            backSteps = 0
+            Telemetry.shared.log("review-account", ["name": name.isEmpty ? "all" : name, "left": "\(count)"])
+        }
+    }
+
+    @ViewBuilder
+    private var card: some View {
+        if let entry = current {
+            ReviewCard(entry: entry, remaining: left,
+                       revisiting: backSteps > 0,
+                       canGoBack: backSteps < recent.count,
+                       back: {
+                           backSteps += 1
+                           Telemetry.shared.log("back", ["steps": "\(backSteps)"])
+                       },
+                       returnToNew: {
+                           Telemetry.shared.log("back-to-new", ["from": "\(backSteps)"])
+                           backSteps = 0
+                       },
+                       saved: { if backSteps > 0 { backSteps -= 1 } })
+                .id(entry.persistentModelID)
+        } else {
+            ContentUnavailableView {
+                Label(source == nil ? "Nothing to review" : "\(source!.name) is done", systemImage: "checkmark.circle")
+            } description: {
+                Text(source == nil ? "Import a CSV from your bank. Its new rows show up here one at a time."
+                                   : "Every row from this account is reviewed. Pick another above, or import its next CSV.")
+            } actions: {
+                Button("Import CSV") { open() }
+                    .buttonStyle(.borderedProminent)
+                if !recent.isEmpty {
+                    Button("Go back over reviewed rows") {
+                        backSteps = 1
+                        Telemetry.shared.log("back", ["steps": "1", "from": "empty"])
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity)
         }
     }
 
