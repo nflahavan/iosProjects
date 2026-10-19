@@ -54,9 +54,18 @@ extension ModelContext {
 
     /// Rows still to decide, oldest file first, in file order.
     /// Rows waiting, a file at a time in import order; one account's, or all.
-    func reviewQueue(from source: Source? = nil) -> [LedgerEntry] {
-        let all = (try? fetch(FetchDescriptor<LedgerEntry>(predicate: #Predicate { $0.kindRaw == nil }))) ?? []
-        return all.filter { source == nil || $0.file?.source === source }.sorted {
+    /// One transaction by its identifier, from a `ReviewSnapshot`; nil if
+    /// it's gone. Fetched rather than taken with `model(for:)`, which hands
+    /// back a model for an identifier with nothing behind it.
+    func entry(_ id: PersistentIdentifier) throws -> LedgerEntry? {
+        var descriptor = FetchDescriptor<LedgerEntry>(predicate: #Predicate { $0.persistentModelID == id })
+        descriptor.fetchLimit = 1
+        return try fetch(descriptor).first
+    }
+
+    /// Nonisolated so `LedgerReader` can run it on its own context.
+    nonisolated func reviewQueue() throws -> [LedgerEntry] {
+        try fetch(FetchDescriptor<LedgerEntry>(predicate: #Predicate { $0.kindRaw == nil })).sorted {
             let a = $0.file?.importedAt ?? .distantPast, b = $1.file?.importedAt ?? .distantPast
             return a == b ? $0.row < $1.row : a < b
         }
@@ -64,13 +73,11 @@ extension ModelContext {
 
     /// Rows already decided, the most recently decided first: what the
     /// review's Back button steps through.
-    func recentlyDecided(from source: Source? = nil, limit: Int = 200) -> [LedgerEntry] {
-        var descriptor = FetchDescriptor<LedgerEntry>(
+    /// Newest decision first. A re-decision keeps its place.
+    nonisolated func recentlyDecided() throws -> [LedgerEntry] {
+        try fetch(FetchDescriptor<LedgerEntry>(
             predicate: #Predicate { $0.reviewedAt != nil },
-            sortBy: [SortDescriptor(\.reviewedAt, order: .reverse)])
-        if source == nil { descriptor.fetchLimit = limit }
-        let decided = (try? fetch(descriptor)) ?? []
-        return Array(decided.filter { source == nil || $0.file?.source === source }.prefix(limit))
+            sortBy: [SortDescriptor(\.reviewedAt, order: .reverse)]))
     }
 
     /// Records a decision. Changing one later keeps when it was first
@@ -265,6 +272,15 @@ nonisolated struct Overview: Equatable, Sendable {
 /// the objects it already loaded, and could answer with old ones.
 @ModelActor
 actor LedgerReader {
+    /// What the review goes through: rows waiting, in order, and rows
+    /// decided, newest first, as identifiers the screen can look up.
+    func review() throws -> ReviewSnapshot {
+        func rows(_ entries: [LedgerEntry]) -> [ReviewSnapshot.Row] {
+            entries.map { .init(id: $0.persistentModelID, source: $0.file?.source?.name ?? "") }
+        }
+        return ReviewSnapshot(waiting: rows(try modelContext.reviewQueue()), decided: rows(try modelContext.recentlyDecided()))
+    }
+
     /// Throws rather than answering with nothing: an empty overview would
     /// say there are no transactions when they couldn't be read.
     func overview() throws -> Overview {
@@ -280,5 +296,29 @@ extension LedgerEntry {
     var totalsItems: [MonthTotals.Item] {
         let month = day.monthKey, kind = kind
         return shares.map { MonthTotals.Item(monthKey: month, kind: kind, contribution: $0.contribution, category: $0.category?.name) }
+    }
+}
+
+/// The review's rows as plain values, from a `LedgerReader`. Accounts are by
+/// name, which is unique; "" means all of them.
+nonisolated struct ReviewSnapshot: Equatable, Sendable {
+    struct Row: Equatable, Sendable {
+        var id: PersistentIdentifier
+        var source: String
+    }
+    /// In the order they'll be reviewed.
+    var waiting: [Row]
+    /// Newest decision first.
+    var decided: [Row]
+
+    func waiting(in source: String) -> [Row] { source.isEmpty ? waiting : waiting.filter { $0.source == source } }
+    func decided(in source: String) -> [Row] { source.isEmpty ? decided : decided.filter { $0.source == source } }
+
+    /// A row just decided and saved, moved where the next read will put it,
+    /// so the next card needn't wait for that read. A re-decision keeps
+    /// its place.
+    mutating func decide(_ id: PersistentIdentifier) {
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        decided.insert(waiting.remove(at: index), at: 0)
     }
 }

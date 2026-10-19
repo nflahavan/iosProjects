@@ -32,23 +32,34 @@ struct LedgerTests {
         oops,BAD,1
         """), into: card)
         #expect(second == ImportSummary(new: 1, alreadyHere: 1, unreadable: 1))
-        #expect(context.reviewQueue().map(\.text) == ["COFFEE", "GROCER", "GAS"])
+        #expect(try context.reviewQueue().map(\.text) == ["COFFEE", "GROCER", "GAS"])
     }
 
-    @Test("The queue and Back can stay within one account")
-    func oneAccount() throws {
+    @Test("The review reads its rows off the main thread, by account too")
+    func oneAccount() async throws {
         let header = ["Date", "Description", "Amount"]
         let card = try context.addSource(name: "Card", header: header, mapping: mapping)
         let bank = try context.addSource(name: "Bank", header: header, mapping: mapping)
         try context.importFile(named: "card.csv", contents: csv("09/30/2026,COFFEE,-4.50\n10/01/2026,GAS,-30.00"), into: card)
         try context.importFile(named: "bank.csv", contents: csv("10/02/2026,RENT,-900.00"), into: bank)
-        #expect(context.reviewQueue().map(\.text) == ["COFFEE", "GAS", "RENT"])
-        #expect(context.reviewQueue(from: bank).map(\.text) == ["RENT"])
+        let reader = { try await LedgerReader(modelContainer: context.container).review() }
+        // Looked up the way the screen does, one row at a time.
+        func texts(_ rows: [ReviewSnapshot.Row]) throws -> [String] {
+            try rows.map { try #require(try context.entry($0.id)).text }
+        }
 
-        try context.decide(try #require(context.reviewQueue(from: bank).first), kind: .transfer, sign: 1, category: nil)
-        #expect(context.reviewQueue(from: bank).isEmpty)
-        #expect(context.recentlyDecided(from: bank).map(\.text) == ["RENT"])
-        #expect(context.recentlyDecided(from: card).isEmpty)
+        var snapshot = try await reader()
+        #expect(try texts(snapshot.waiting) == ["COFFEE", "GAS", "RENT"])
+        #expect(try texts(snapshot.waiting(in: "Bank")) == ["RENT"])
+
+        // Deciding moves the row at once, to where the next read puts it.
+        let rent = try #require(snapshot.waiting(in: "Bank").first)
+        try context.decide(try #require(try context.entry(rent.id)), kind: .transfer, sign: 1, category: nil)
+        snapshot.decide(rent.id)
+        #expect(snapshot == (try await reader()))
+        #expect(snapshot.waiting(in: "Bank").isEmpty)
+        #expect(try texts(snapshot.decided(in: "Bank")) == ["RENT"])
+        #expect(snapshot.decided(in: "Card").isEmpty)
     }
 
     @Test("Another source's identical row isn't a duplicate")
@@ -82,7 +93,7 @@ struct LedgerTests {
     func decideRules() throws {
         let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
         try context.importFile(named: "a.csv", contents: csv("10/01/2026,X,-1.00"), into: card)
-        let entry = try #require(context.reviewQueue().first)
+        let entry = try #require(try context.reviewQueue().first)
         let salary = try context.category(named: "Salary", kind: .income)
 
         #expect(throws: LedgerError.needsCategory) { try context.decide(entry, kind: .expense, sign: 1, category: nil) }
@@ -90,7 +101,7 @@ struct LedgerTests {
         try context.decide(entry, kind: .transfer, sign: 1, category: salary)
         #expect(entry.kind == .transfer)
         #expect(entry.category == nil)
-        #expect(context.reviewQueue().isEmpty)
+        #expect(try context.reviewQueue().isEmpty)
     }
 
     @Test("Chips come most-used first, then by name")
@@ -104,7 +115,7 @@ struct LedgerTests {
         let dining = try context.category(named: "Dining", kind: .expense)
         let groceries = try context.category(named: "Groceries", kind: .expense)
         _ = try context.category(named: "Auto", kind: .expense)
-        for entry in context.reviewQueue() {
+        for entry in try context.reviewQueue() {
             try context.decide(entry, kind: .expense, sign: 1, category: entry.text == "A" ? dining : groceries)
         }
         #expect(context.categories(.expense).map(\.name) == ["Groceries", "Dining", "Auto"])
@@ -123,7 +134,7 @@ struct LedgerTests {
         let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
         try context.importFile(named: "a.csv", contents: csv("10/01/2026,X,-1.00"), into: card)
         let gifts = try context.category(named: "Gifts", kind: .expense)
-        try context.decide(try #require(context.reviewQueue().first), kind: .expense, sign: 1, category: gifts)
+        try context.decide(try #require(try context.reviewQueue().first), kind: .expense, sign: 1, category: gifts)
         #expect(throws: LedgerError.categoryInUse("Gifts")) { try context.remove(gifts) }
     }
 }
@@ -182,17 +193,17 @@ struct GoingBackTests {
         let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
         try context.importFile(named: "a.csv", contents: Data("Date,Description,Amount\n10/01/2026,A,-1\n10/02/2026,B,-1\n10/03/2026,C,-1".utf8), into: card)
         let food = try context.category(named: "Food", kind: .expense)
-        for entry in context.reviewQueue() {
+        for entry in try context.reviewQueue() {
             try context.decide(entry, kind: .expense, sign: 1, category: food)
             try? await Task.sleep(for: .milliseconds(5))
         }
-        #expect(context.recentlyDecided().map(\.text) == ["C", "B", "A"])
+        #expect(try context.recentlyDecided().map(\.text) == ["C", "B", "A"])
 
         let fun = try context.category(named: "Fun", kind: .expense)
-        let b = try #require(context.recentlyDecided().first { $0.text == "B" })
+        let b = try #require(try context.recentlyDecided().first { $0.text == "B" })
         try context.decide(b, kind: .expense, sign: 1, category: fun)
         #expect(b.category === fun)
-        #expect(context.recentlyDecided().map(\.text) == ["C", "B", "A"])
+        #expect(try context.recentlyDecided().map(\.text) == ["C", "B", "A"])
     }
 }
 
@@ -210,7 +221,7 @@ struct SplitTests {
                                     dateLayout: .monthDayYear)
         let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
         try context.importFile(named: "a.csv", contents: Data("Date,Description,Amount\n10/04/2026,TARGET,-150.00".utf8), into: card)
-        entry = try #require(context.reviewQueue().first)
+        entry = try #require(try context.reviewQueue().first)
         groceries = try context.category(named: "Groceries", kind: .expense)
         household = try context.category(named: "Household", kind: .expense)
     }

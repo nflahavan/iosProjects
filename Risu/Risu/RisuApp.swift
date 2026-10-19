@@ -20,7 +20,7 @@ struct RisuApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(incoming: $incoming)
+            RootView(incoming: $incoming, container: container)
                 .onOpenURL { url in incoming = IncomingFile(url: url) }
                 .onAppear { TapRecorder.shared.install() }
         }
@@ -44,17 +44,23 @@ struct IncomingFile: Identifiable {
 
 struct RootView: View {
     @Binding var incoming: IncomingFile?
-    @Query(filter: #Predicate<LedgerEntry> { $0.kindRaw == nil }) private var toReview: [LedgerEntry]
+    /// Shared with the tab's badge, so neither holds every waiting row.
+    @State private var review: ReviewState
     @State private var tab = Tab.review
+
+    init(incoming: Binding<IncomingFile?>, container: ModelContainer) {
+        _incoming = incoming
+        _review = State(initialValue: ReviewState(container: container))
+    }
 
     enum Tab: String { case review, transactions, categories, overview }
 
     var body: some View {
         TabView(selection: $tab) {
             SwiftUI.Tab("Review", systemImage: "rectangle.stack", value: Tab.review) {
-                ReviewScreen(importFile: $incoming)
+                ReviewScreen(importFile: $incoming, review: review)
             }
-            .badge(toReview.count)
+            .badge(review.snapshot?.waiting.count ?? 0)
             SwiftUI.Tab("Transactions", systemImage: "list.bullet", value: Tab.transactions) {
                 TransactionsScreen()
             }
@@ -66,7 +72,7 @@ struct RootView: View {
             }
         }
         .onChange(of: tab) { _, new in Telemetry.shared.log("tab", ["to": new.rawValue]) }
-        .sheet(item: $incoming) { file in
+        .sheet(item: $incoming, onDismiss: { review.refresh(after: .elsewhere) }) { file in
             ImportFlow(file: file) { tab = .review }
         }
     }

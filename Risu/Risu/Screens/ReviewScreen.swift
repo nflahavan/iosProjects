@@ -6,8 +6,8 @@ import UniformTypeIdentifiers
 /// One new row at a time: what it was, which way it counts, which category.
 struct ReviewScreen: View {
     @Binding var importFile: IncomingFile?
+    let review: ReviewState
     @Environment(\.modelContext) private var context
-    @Query(filter: #Predicate<LedgerEntry> { $0.kindRaw == nil }) private var waiting: [LedgerEntry]
     @Query(sort: \Source.name) private var sources: [Source]
     /// The account being reviewed, by name; empty is all of them.
     @AppStorage("reviewSource") private var sourceName = ""
@@ -17,25 +17,47 @@ struct ReviewScreen: View {
     /// next new row.
     @State private var backSteps = 0
 
-    private var source: Source? { sources.first { $0.name == sourceName } }
-    private var recent: [LedgerEntry] { context.recentlyDecided(from: source) }
-    private var left: Int { source.map { s in waiting.count { $0.file?.source === s } } ?? waiting.count }
+    /// The picked account, while it still exists.
+    private var account: String { sources.contains { $0.name == sourceName } ? sourceName : "" }
+    private var waiting: [ReviewSnapshot.Row] { review.snapshot?.waiting(in: account) ?? [] }
+    private var decided: [ReviewSnapshot.Row] { review.snapshot?.decided(in: account) ?? [] }
 
-    private var current: LedgerEntry? {
+    private enum Card {
+        case entry(LedgerEntry)
+        case none
+        case failed(String)
+    }
+
+    /// The one row on screen, looked up by its identifier. Waiting rows
+    /// are checked against the store, since one decided elsewhere since the
+    /// last read must not come up again.
+    private var current: Card {
         if backSteps > 0 {
-            let recent = recent
-            return backSteps <= recent.count ? recent[backSteps - 1] : nil
+            return backSteps <= decided.count ? lookup(decided[backSteps - 1].id) : .none
         }
-        return context.reviewQueue(from: source).first
+        for row in waiting {
+            switch lookup(row.id) {
+            case .entry(let entry) where entry.kindRaw == nil: return .entry(entry)
+            case .entry, .none: continue
+            case .failed(let why): return .failed(why)
+            }
+        }
+        return .none
+    }
+
+    private func lookup(_ id: PersistentIdentifier) -> Card {
+        do { return try context.entry(id).map(Card.entry) ?? .none }
+        catch { return .failed(error.localizedDescription) }
     }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 if sources.count > 1 { accountPicker }
-                card
+                status
+                content
             }
-            .navigationTitle(left == 0 ? "Review" : "Review · \(left) left")
+            .navigationTitle(review.snapshot == nil || waiting.isEmpty ? "Review" : "Review · \(waiting.count) left")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -59,7 +81,59 @@ struct ReviewScreen: View {
             }
             .sheet(isPresented: $showingSettings) { SettingsScreen() }
             .screen("review")
+            // Coming back from another tab: something there may have changed.
+            .onAppear { review.refresh(after: .elsewhere) }
         }
+    }
+
+    /// Said whenever the counts may not be current.
+    @ViewBuilder
+    private var status: some View {
+        if review.snapshot != nil, review.updating || review.problem != nil {
+            HStack(spacing: 8) {
+                if review.updating {
+                    ProgressView().controlSize(.small)
+                    Text("Updating the rows to review…")
+                } else {
+                    Label("Couldn't update the rows to review", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("Try again") { review.refresh(after: .elsewhere) }
+                }
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .background(.bar)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if review.snapshot == nil {
+            if let problem = review.problem {
+                failed(problem)
+            } else {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Finding the rows to review…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        } else {
+            card
+        }
+    }
+
+    private func failed(_ why: String) -> some View {
+        ContentUnavailableView {
+            Label("Couldn't read the rows to review", systemImage: "exclamationmark.triangle")
+        } description: { Text(why) } actions: {
+            Button("Try again") { review.refresh(after: .elsewhere) }.buttonStyle(.borderedProminent)
+        }
+        .frame(maxHeight: .infinity)
     }
 
     /// Which account's rows to go through. All of them is a file at a
@@ -67,9 +141,9 @@ struct ReviewScreen: View {
     private var accountPicker: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
-                accountChip("All", count: waiting.count, name: "")
+                accountChip("All", count: review.snapshot?.waiting.count, name: "")
                 ForEach(sources) { source in
-                    accountChip(source.name, count: waiting.count { $0.file?.source === source }, name: source.name)
+                    accountChip(source.name, count: review.snapshot?.waiting(in: source.name).count, name: source.name)
                 }
             }
             .padding(.horizontal, 20)
@@ -80,21 +154,25 @@ struct ReviewScreen: View {
         .overlay(alignment: .bottom) { Divider() }
     }
 
-    private func accountChip(_ title: String, count: Int, name: String) -> some View {
-        Chip(title: "\(title)  \(count)", selected: sourceName == name) {
-            guard sourceName != name else { return }
+    /// The count is left out until the first read is back.
+    private func accountChip(_ title: String, count: Int?, name: String) -> some View {
+        Chip(title: count.map { "\(title)  \($0)" } ?? title, selected: account == name) {
+            guard account != name else { return }
             sourceName = name
             backSteps = 0
-            Telemetry.shared.log("review-account", ["name": name.isEmpty ? "all" : name, "left": "\(count)"])
+            Telemetry.shared.log("review-account", ["name": name.isEmpty ? "all" : name, "left": count.map(String.init) ?? "?"])
         }
     }
 
     @ViewBuilder
     private var card: some View {
-        if let entry = current {
-            ReviewCard(entry: entry, remaining: left,
+        switch current {
+        case .failed(let why):
+            failed(why)
+        case .entry(let entry):
+            ReviewCard(entry: entry, remaining: waiting.count,
                        revisiting: backSteps > 0,
-                       canGoBack: backSteps < recent.count,
+                       canGoBack: backSteps < decided.count,
                        back: {
                            backSteps += 1
                            Telemetry.shared.log("back", ["steps": "\(backSteps)"])
@@ -103,18 +181,25 @@ struct ReviewScreen: View {
                            Telemetry.shared.log("back-to-new", ["from": "\(backSteps)"])
                            backSteps = 0
                        },
-                       saved: { if backSteps > 0 { backSteps -= 1 } })
+                       saved: {
+                           if backSteps > 0 {
+                               backSteps -= 1
+                               review.refresh(after: .decision)
+                           } else {
+                               review.decided(entry.persistentModelID)
+                           }
+                       })
                 .id(entry.persistentModelID)
-        } else {
+        case .none:
             ContentUnavailableView {
-                Label(source == nil ? "Nothing to review" : "\(source!.name) is done", systemImage: "checkmark.circle")
+                Label(account.isEmpty ? "Nothing to review" : "\(account) is done", systemImage: "checkmark.circle")
             } description: {
-                Text(source == nil ? "Import a CSV from your bank. Its new rows show up here one at a time."
-                                   : "Every row from this account is reviewed. Pick another above, or import its next CSV.")
+                Text(account.isEmpty ? "Import a CSV from your bank. Its new rows show up here one at a time."
+                                     : "Every row from this account is reviewed. Pick another above, or import its next CSV.")
             } actions: {
                 Button("Import CSV") { open() }
                     .buttonStyle(.borderedProminent)
-                if !recent.isEmpty {
+                if !decided.isEmpty {
                     Button("Go back over reviewed rows") {
                         backSteps = 1
                         Telemetry.shared.log("back", ["steps": "1", "from": "empty"])
