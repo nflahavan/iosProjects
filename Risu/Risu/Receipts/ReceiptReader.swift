@@ -1,0 +1,87 @@
+import CoreGraphics
+import Foundation
+import PDFKit
+import UIKit
+import Vision
+
+/// A receipt as it came in: a photo, a screenshot or a PDF.
+nonisolated struct ReceiptFile: Equatable, Sendable {
+    var data: Data
+    var isPDF: Bool
+
+    /// Its pages as images, for reading and for showing.
+    func pages() -> [CGImage] {
+        if !isPDF { return UIImage(data: data)?.uprightCGImage().map { [$0] } ?? [] }
+        guard let document = PDFDocument(data: data) else { return [] }
+        return (0..<document.pageCount).compactMap { index in
+            guard let page = document.page(at: index) else { return nil }
+            let bounds = page.bounds(for: .mediaBox)
+            // Small print needs pixels: render at three times the page size.
+            let size = CGSize(width: bounds.width * 3, height: bounds.height * 3)
+            return page.thumbnail(of: size, for: .mediaBox).cgImage
+        }
+    }
+}
+
+/// Reading a receipt's text on the phone, with Vision. Nothing leaves it.
+nonisolated enum ReceiptReader {
+    static func read(_ file: ReceiptFile) async throws -> ReceiptReading {
+        let pages = file.pages()
+        guard !pages.isEmpty else { throw ReceiptProblem.unreadable }
+        var lines: [String] = []
+        for page in pages {
+            var request = RecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            // Item names are abbreviations; "correcting" them makes them worse.
+            request.usesLanguageCorrection = false
+            let observations = try await request.perform(on: page)
+            lines += self.lines(observations.compactMap { observation in
+                guard let text = observation.topCandidates(1).first?.string else { return nil }
+                let ys = [observation.topLeft.y, observation.topRight.y, observation.bottomLeft.y, observation.bottomRight.y]
+                return Fragment(text: text, minX: min(observation.topLeft.x, observation.bottomLeft.x),
+                                midY: ys.reduce(0, +) / 4, height: ys.max()! - ys.min()!)
+            })
+        }
+        return ReceiptReading(lines: lines)
+    }
+
+    /// One piece of recognised text and where it sat, in Vision's
+    /// coordinates: 0 to 1, with y counting up from the bottom.
+    struct Fragment {
+        var text: String
+        var minX: Double
+        var midY: Double
+        var height: Double
+    }
+
+    /// Puts fragments back into lines. Vision often reads an item's name and
+    /// its price, far apart on the same row, as separate pieces; ones whose
+    /// middles sit within half a line of each other are the same row.
+    static func lines(_ fragments: [Fragment]) -> [String] {
+        let heights = fragments.map(\.height).sorted()
+        guard !heights.isEmpty else { return [] }
+        let tolerance = heights[heights.count / 2] / 2
+        var rows: [[Fragment]] = []
+        for fragment in fragments.sorted(by: { $0.midY > $1.midY }) {
+            if let last = rows.last, let anchor = last.first, abs(anchor.midY - fragment.midY) <= tolerance {
+                rows[rows.count - 1].append(fragment)
+            } else {
+                rows.append([fragment])
+            }
+        }
+        return rows.map { $0.sorted { $0.minX < $1.minX }.map(\.text).joined(separator: "  ") }
+    }
+}
+
+private extension UIImage {
+    /// The pixels the way the photo is seen, so a sideways phone photo
+    /// reads in rows rather than columns.
+    nonisolated func uprightCGImage() -> CGImage? {
+        guard imageOrientation != .up else { return cgImage }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: size.width * scale, height: size.height * scale), format: format)
+            .image { _ in draw(in: CGRect(origin: .zero, size: CGSize(width: size.width * scale, height: size.height * scale))) }
+            .cgImage
+    }
+}

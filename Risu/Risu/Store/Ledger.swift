@@ -89,7 +89,7 @@ extension ModelContext {
 
     /// Records a split: the pieces must be from the kind's list and add up to
     /// the bank amount exactly.
-    func decideSplit(_ entry: LedgerEntry, kind: Kind, sign: Int, parts: [(cents: Int, category: Category)]) throws {
+    func decideSplit(_ entry: LedgerEntry, kind: Kind, sign: Int, parts: [(cents: Int, category: Category, label: String)]) throws {
         guard kind != .transfer else { throw LedgerError.transferSplit }
         guard parts.count >= 2, parts.allSatisfy({ $0.cents > 0 }) else { throw LedgerError.splitNeedsParts }
         guard parts.allSatisfy({ $0.category.kind == kind.categoryKind }) else { throw LedgerError.wrongCategoryKind }
@@ -102,12 +102,21 @@ extension ModelContext {
         entry.category = nil
         clearParts(of: entry)
         for (index, part) in parts.enumerated() {
-            let made = SplitPart(cents: part.cents, order: index, category: part.category)
+            let made = SplitPart(cents: part.cents, order: index, category: part.category, label: part.label)
             insert(made)
             made.entry = entry
         }
         if entry.reviewedAt == nil { entry.reviewedAt = .now }
         try save()
+    }
+
+    /// Keeps a receipt with its transaction, replacing any earlier one.
+    func attach(_ file: ReceiptFile?, to entry: LedgerEntry) {
+        guard let file, entry.receipt?.file != file else { return }
+        if let old = entry.receipt { delete(old) }
+        let receipt = Receipt(file)
+        insert(receipt)
+        entry.receipt = receipt
     }
 
     private func clearParts(of entry: LedgerEntry) {

@@ -95,6 +95,9 @@ final class LedgerEntry {
     @Relationship(deleteRule: .cascade, inverse: \SplitPart.entry)
     var parts: [SplitPart] = []
     var file: ImportedFile?
+    /// The receipt behind it, when you added one to split it by item.
+    @Relationship(deleteRule: .cascade, inverse: \Receipt.entry)
+    var receipt: Receipt?
     /// Its row in the file, counted from the first row under the header.
     var row: Int
     var mergeKey: String
@@ -133,13 +136,33 @@ final class LedgerEntry {
 final class SplitPart {
     var cents: Int
     var order: Int
+    /// What it was, when it came from a receipt line: "Cloud Island".
+    var label: String = ""
     var category: Category?
     var entry: LedgerEntry?
 
-    init(cents: Int, order: Int, category: Category) {
+    init(cents: Int, order: Int, category: Category, label: String = "") {
         self.cents = cents
         self.order = order
         self.category = category
+        self.label = label
+    }
+}
+
+/// A receipt, kept with the transaction it explains, on the phone only.
+@Model
+final class Receipt {
+    @Attribute(.externalStorage) var data: Data
+    var isPDF: Bool
+    var addedAt: Date
+    var entry: LedgerEntry?
+
+    var file: ReceiptFile { ReceiptFile(data: data, isPDF: isPDF) }
+
+    init(_ file: ReceiptFile) {
+        self.data = file.data
+        self.isPDF = file.isPDF
+        self.addedAt = .now
     }
 }
 
@@ -167,7 +190,7 @@ final class Category {
 }
 
 nonisolated enum RisuStore {
-    static let models: [any PersistentModel.Type] = [Source.self, ImportedFile.self, LedgerEntry.self, SplitPart.self, Category.self]
+    static let models: [any PersistentModel.Type] = [Source.self, ImportedFile.self, LedgerEntry.self, SplitPart.self, Receipt.self, Category.self]
 
     /// Its own file. The app this one replaced left a `default.store` in the
     /// phone's container with a different schema; opening that would fail.

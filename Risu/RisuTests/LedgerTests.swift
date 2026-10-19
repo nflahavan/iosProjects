@@ -202,9 +202,9 @@ struct SplitTests {
     @Test("Parts must add up to the bank amount, to the cent")
     func addsUp() throws {
         #expect(throws: LedgerError.splitDoesNotAddUp(total: 14999, expected: 15000)) {
-            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (4999, household)])
+            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (4999, household, "")])
         }
-        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])
         #expect(entry.isSplit)
         #expect(entry.category == nil)
         #expect(entry.shares.map(\.contribution) == [10000, 5000])
@@ -213,19 +213,19 @@ struct SplitTests {
     @Test("A transfer can't be split, and a split needs two real parts")
     func rules() {
         #expect(throws: LedgerError.transferSplit) {
-            try context.decideSplit(entry, kind: .transfer, sign: 1, parts: [(10000, groceries), (5000, household)])
+            try context.decideSplit(entry, kind: .transfer, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])
         }
         #expect(throws: LedgerError.splitNeedsParts) {
-            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(15000, groceries)])
+            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(15000, groceries, "")])
         }
         #expect(throws: LedgerError.splitNeedsParts) {
-            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(15000, groceries), (0, household)])
+            try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(15000, groceries, ""), (0, household, "")])
         }
     }
 
     @Test("Deciding it as one category again clears the parts")
     func unsplit() throws {
-        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])
         try context.decide(entry, kind: .expense, sign: 1, category: groceries)
         #expect(!entry.isSplit)
         #expect(try context.fetchCount(FetchDescriptor<SplitPart>()) == 0)
@@ -233,7 +233,7 @@ struct SplitTests {
 
     @Test("Each part counts in its own category, and as a use of it")
     func totalsAndUses() throws {
-        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])
         let items = entry.shares.map {
             MonthTotals.Item(monthKey: entry.day.monthKey, kind: entry.kind, contribution: $0.contribution, category: $0.category?.name)
         }
@@ -246,7 +246,7 @@ struct SplitTests {
 
     @Test("A split row is still one bank row to the merge")
     func merge() throws {
-        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries), (5000, household)])
+        try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])
         let source = try #require(entry.file?.source)
         let again = try context.importFile(named: "b.csv", contents: Data("Date,Description,Amount\n10/04/2026,TARGET,-150.00".utf8), into: source)
         #expect(again.new == 0)

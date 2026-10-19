@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
@@ -105,6 +106,7 @@ struct ReviewCard: View {
     @State private var sign: Int
     @State private var category: Category?
     @State private var split: [SplitDraft]
+    @State private var receipt: ReceiptFile?
     @State private var problem: String?
     @State private var shown = Date.now
 
@@ -122,6 +124,7 @@ struct ReviewCard: View {
         _sign = State(initialValue: entry.kind == nil ? 1 : entry.sign)
         _category = State(initialValue: entry.category)
         _split = State(initialValue: .from(entry))
+        _receipt = State(initialValue: entry.receipt?.file)
     }
 
     var body: some View {
@@ -131,7 +134,7 @@ struct ReviewCard: View {
                     if revisiting { revisitBanner }
                     summary
                     DecisionControls(kind: $kind, sign: $sign, category: $category, split: $split,
-                                     total: abs(entry.amountCents))
+                                     receipt: $receipt, total: abs(entry.amountCents))
                 }
                 .padding(20)
             }
@@ -206,11 +209,12 @@ struct ReviewCard: View {
 
     private func save() {
         do {
-            try context.record(entry, kind: kind, sign: sign, category: category, split: split)
+            try context.record(entry, kind: kind, sign: sign, category: category, split: split, receipt: receipt)
             Telemetry.shared.log("decided", [
                 "kind": kind.rawValue, "sign": sign > 0 ? "adds" : "subtracts",
                 "category": split.isEmpty ? (category?.name ?? "") : split.compactMap { $0.category?.name }.joined(separator: " + "),
                 "parts": "\(max(split.count, 1))",
+                "receipt": "\(receipt != nil)",
                 "seconds": String(format: "%.1f", Date.now.timeIntervalSince(shown)),
                 "remaining": "\(revisiting ? remaining : remaining - 1)",
                 "revisit": "\(revisiting)",
@@ -228,9 +232,21 @@ struct SplitDraft: Identifiable, Equatable {
     let id = UUID()
     var text = ""
     var category: Category?
+    /// The receipt line it came from, if any.
+    var label = ""
+
+    init(text: String = "", category: Category? = nil, label: String = "") {
+        self.text = text
+        self.category = category
+        self.label = label
+    }
+
+    init(cents: Int, category: Category? = nil, label: String = "") {
+        self.init(text: String(format: "%d.%02d", cents / 100, cents % 100), category: category, label: label)
+    }
 
     static func == (a: SplitDraft, b: SplitDraft) -> Bool {
-        a.id == b.id && a.text == b.text && a.category === b.category
+        a.id == b.id && a.text == b.text && a.category === b.category && a.label == b.label
     }
 }
 
@@ -243,20 +259,20 @@ extension Array where Element == SplitDraft {
     }
 
     /// The pieces ready to save, or nil while one is missing or empty.
-    func resolved(total: Int) -> [(cents: Int, category: Category)]? {
+    func resolved(total: Int) -> [(cents: Int, category: Category, label: String)]? {
         guard count >= 2 else { return nil }
         let amounts = cents(total: total)
-        var out: [(cents: Int, category: Category)] = []
+        var out: [(cents: Int, category: Category, label: String)] = []
         for (draft, cents) in zip(self, amounts) {
             guard cents > 0, let category = draft.category else { return nil }
-            out.append((cents, category))
+            out.append((cents, category, draft.label))
         }
         return out
     }
 
     static func from(_ entry: LedgerEntry) -> [SplitDraft] {
         entry.parts.sorted { $0.order < $1.order }.map {
-            SplitDraft(text: String(format: "%d.%02d", $0.cents / 100, $0.cents % 100), category: $0.category)
+            SplitDraft(cents: $0.cents, category: $0.category, label: $0.label)
         }
     }
 }
@@ -268,8 +284,11 @@ func decisionIsComplete(kind: Kind, category: Category?, split: [SplitDraft], to
 }
 
 extension ModelContext {
-    /// Saves whichever the controls hold: a split or a single answer.
-    func record(_ entry: LedgerEntry, kind: Kind, sign: Int, category: Category?, split: [SplitDraft]) throws {
+    /// Saves whichever the controls hold: a split or a single answer, and
+    /// the receipt if one was added.
+    func record(_ entry: LedgerEntry, kind: Kind, sign: Int, category: Category?, split: [SplitDraft],
+                receipt: ReceiptFile? = nil) throws {
+        attach(receipt, to: entry)
         if kind != .transfer, !split.isEmpty {
             guard let parts = split.resolved(total: abs(entry.amountCents)) else { throw LedgerError.splitNeedsParts }
             try decideSplit(entry, kind: kind, sign: sign, parts: parts)
@@ -286,6 +305,7 @@ struct DecisionControls: View {
     @Binding var sign: Int
     @Binding var category: Category?
     @Binding var split: [SplitDraft]
+    @Binding var receipt: ReceiptFile?
     /// The bank amount, positive, which a split's pieces must add up to.
     let total: Int
     @Environment(\.modelContext) private var context
@@ -294,77 +314,67 @@ struct DecisionControls: View {
     @State private var renaming: Category?
     @State private var newName = ""
     @State private var problem: String?
+    @State private var pickingPhoto = false
+    @State private var pickingFile = false
+    @State private var photo: PhotosPickerItem?
+    @State private var reading = false
+    @State private var showingReceipt = false
     @FocusState private var focused: UUID?
 
     private var splitting: Bool { !split.isEmpty }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("What is it?").font(.headline)
-                Picker("Kind", selection: $kind) {
-                    ForEach(Kind.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.large)
-                .onChange(of: kind) { old, new in
-                    // Chips picked belong to the other list.
-                    if category?.kind != new.categoryKind { category = nil }
-                    for i in split.indices where split[i].category?.kind != new.categoryKind { split[i].category = nil }
-                    if new == .transfer { split = [] }
-                    Telemetry.shared.log("kind", ["from": old.rawValue, "to": new.rawValue])
-                }
-            }
-
-            if kind != .transfer {
+        ScrollViewReader { scroller in
+            VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Counts as").font(.headline)
-                    Picker("Counts as", selection: $sign) {
-                        Text(kind == .income ? "Income" : "Spending").tag(1)
-                        Text(kind == .income ? "Taking back income" : "Refund").tag(-1)
+                    Text("What is it?").font(.headline)
+                    Picker("Kind", selection: $kind) {
+                        ForEach(Kind.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    .onChange(of: sign) { _, new in Telemetry.shared.log("sign", ["to": new > 0 ? "adds" : "subtracts"]) }
+                    .controlSize(.large)
+                    .onChange(of: kind) { old, new in
+                        // Chips picked belong to the other list.
+                        if category?.kind != new.categoryKind { category = nil }
+                        for i in split.indices where split[i].category?.kind != new.categoryKind { split[i].category = nil }
+                        if new == .transfer { split = [] }
+                        Telemetry.shared.log("kind", ["from": old.rawValue, "to": new.rawValue])
+                    }
                 }
 
-                if splitting { splitEditor }
+                if kind != .transfer {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Counts as").font(.headline)
+                        Picker("Counts as", selection: $sign) {
+                            Text(kind == .income ? "Income" : "Spending").tag(1)
+                            Text(kind == .income ? "Taking back income" : "Refund").tag(-1)
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: sign) { _, new in Telemetry.shared.log("sign", ["to": new > 0 ? "adds" : "subtracts"]) }
+                    }
 
-                if let side = kind.categoryKind {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text(splitting ? "Category for part \(active + 1)" : "Category").font(.headline)
-                            Spacer()
-                            if !splitting {
+                    if splitting {
+                        splitEditor
+                    } else if let side = kind.categoryKind {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Category").font(.headline)
+                                Spacer()
                                 Button("Split", systemImage: "square.split.2x1") { startSplit() }
                                     .font(.subheadline)
                             }
-                        }
-                        ChipFlow(spacing: 8) {
-                            ForEach(context.categories(side)) { chip in
-                                Chip(title: chip.name, selected: selected(chip)) { pick(chip) }
-                                    // A typo in + New is fixed where it was made.
-                                    .contextMenu {
-                                        Button("Rename", systemImage: "pencil") {
-                                            newName = chip.name
-                                            renaming = chip
-                                            Telemetry.shared.log("chip-menu", ["action": "rename"])
-                                        }
-                                        if chip.uses == 0 {
-                                            Button("Delete", systemImage: "trash", role: .destructive) { remove(chip) }
-                                        }
-                                    }
-                            }
-                            Chip(title: "+ New", selected: false, dashed: true) {
-                                Telemetry.shared.log("button", ["name": "new-category"])
-                                newName = ""
-                                adding = true
-                            }
+                            chips(side)
                         }
                     }
+                } else {
+                    Text("Money moving between your own accounts. It counts as neither income nor spending, and needs no category.")
+                        .font(.callout).foregroundStyle(.secondary)
                 }
-            } else {
-                Text("Money moving between your own accounts. It counts as neither income nor spending, and needs no category.")
-                    .font(.callout).foregroundStyle(.secondary)
+            }
+            .onChange(of: active) { _, new in
+                // The chips sit under the active part; keep it in view.
+                guard split.indices.contains(new) else { return }
+                withAnimation { scroller.scrollTo(split[new].id, anchor: .top) }
             }
         }
         .alert("New \(kind.categoryKind?.title.lowercased() ?? "") category", isPresented: $adding) {
@@ -386,6 +396,59 @@ struct DecisionControls: View {
         .alert("Can't do that", isPresented: .constant(problem != nil)) {
             Button("OK") { problem = nil }
         } message: { Text(problem ?? "") }
+        .photosPicker(isPresented: $pickingPhoto, selection: $photo, matching: .images)
+        .onChange(of: photo) { _, item in
+            guard let item else { return }
+            photo = nil
+            reading = true
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    await read(ReceiptFile(data: data, isPDF: false), from: "photos")
+                } else {
+                    reading = false
+                    problem = ReceiptProblem.unreadable.localizedDescription
+                }
+            }
+        }
+        .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.image, .pdf]) { result in
+            guard case .success(let url) = result else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                problem = ReceiptProblem.unreadable.localizedDescription
+                return
+            }
+            let isPDF = UTType(filenameExtension: url.pathExtension)?.conforms(to: .pdf) ?? false
+            reading = true
+            Task { await read(ReceiptFile(data: data, isPDF: isPDF), from: "files") }
+        }
+        .sheet(isPresented: $showingReceipt) {
+            if let receipt { ReceiptViewer(file: receipt) }
+        }
+    }
+
+    private func chips(_ side: CategoryKind) -> some View {
+        ChipFlow(spacing: 8) {
+            ForEach(context.categories(side)) { chip in
+                Chip(title: chip.name, selected: selected(chip)) { pick(chip) }
+                    // A typo in + New is fixed where it was made.
+                    .contextMenu {
+                        Button("Rename", systemImage: "pencil") {
+                            newName = chip.name
+                            renaming = chip
+                            Telemetry.shared.log("chip-menu", ["action": "rename"])
+                        }
+                        if chip.uses == 0 {
+                            Button("Delete", systemImage: "trash", role: .destructive) { remove(chip) }
+                        }
+                    }
+            }
+            Chip(title: "+ New", selected: false, dashed: true) {
+                Telemetry.shared.log("button", ["name": "new-category"])
+                newName = ""
+                adding = true
+            }
+        }
     }
 
     // MARK: Splitting
@@ -404,48 +467,15 @@ struct DecisionControls: View {
                 }
                 .font(.subheadline)
             }
+            receiptBar
             ForEach(Array(split.enumerated()), id: \.element.id) { index, draft in
-                HStack(spacing: 10) {
-                    Button { active = index } label: {
-                        HStack {
-                            Text("\(index + 1)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
-                            Text(draft.category?.name ?? "Pick a category")
-                                .foregroundStyle(draft.category == nil ? Color.secondary : Color.primary)
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(index == active ? Color.accentColor.opacity(0.16) : Color(.secondarySystemFill),
-                                    in: RoundedRectangle(cornerRadius: 10))
-                        .overlay {
-                            if index == active { RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor, lineWidth: 1.5) }
-                        }
-                    }
-                    .buttonStyle(.plain)
-
-                    if index == split.count - 1 {
-                        Text(Money.text(left))
-                            .monospacedDigit()
-                            .foregroundStyle(left > 0 ? Color.secondary : Color.red)
-                            .frame(width: 96, alignment: .trailing)
-                    } else {
-                        TextField("0.00", text: $split[index].text)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
-                            .monospacedDigit()
-                            .focused($focused, equals: draft.id)
-                            .frame(width: 96)
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 8)
-                            .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 10))
-                    }
-                    if split.count > 2 {
-                        Button("Remove part", systemImage: "minus.circle") { removePart(index) }
-                            .labelStyle(.iconOnly)
-                            .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    partRow(index, draft, left: left)
+                    if index == active, let side = kind.categoryKind {
+                        chips(side).padding(.leading, 4).padding(.bottom, 6)
                     }
                 }
+                .id(draft.id)
             }
             HStack {
                 Button("Add part", systemImage: "plus") { addPart() }
@@ -467,11 +497,121 @@ struct DecisionControls: View {
         }
     }
 
+    /// Splitting by a receipt's items instead of by hand.
+    private var receiptBar: some View {
+        HStack {
+            if reading {
+                ProgressView()
+                Text("Reading the receipt…").font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                Menu {
+                    Button("Photos", systemImage: "photo") {
+                        Telemetry.shared.log("button", ["name": "receipt-photos"])
+                        pickingPhoto = true
+                    }
+                    Button("Files", systemImage: "folder") {
+                        Telemetry.shared.log("button", ["name": "receipt-files"])
+                        pickingFile = true
+                    }
+                } label: {
+                    Label(receipt == nil ? "Split by receipt" : "Another receipt", systemImage: "receipt")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+            Spacer()
+            if receipt != nil, !reading {
+                Button("View receipt") {
+                    Telemetry.shared.log("button", ["name": "view-receipt"])
+                    showingReceipt = true
+                }
+                .font(.subheadline)
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemFill).opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func partRow(_ index: Int, _ draft: SplitDraft, left: Int) -> some View {
+        HStack(spacing: 10) {
+            Button { active = index } label: {
+                HStack {
+                    Text("\(index + 1)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        if !draft.label.isEmpty {
+                            Text(draft.label).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        }
+                        Text(draft.category?.name ?? "Pick a category")
+                            .font(draft.label.isEmpty ? .body : .subheadline)
+                            .foregroundStyle(draft.category == nil ? Color.secondary : (draft.label.isEmpty ? Color.primary : Color.accentColor))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(index == active ? Color.accentColor.opacity(0.16) : Color(.secondarySystemFill),
+                            in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    if index == active { RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor, lineWidth: 1.5) }
+                }
+            }
+            .buttonStyle(.plain)
+
+            if index == split.count - 1 {
+                Text(Money.text(left))
+                    .monospacedDigit()
+                    .foregroundStyle(left > 0 ? Color.secondary : Color.red)
+                    .frame(width: 96, alignment: .trailing)
+            } else {
+                TextField("0.00", text: $split[index].text)
+                    .keyboardType(.decimalPad)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .focused($focused, equals: draft.id)
+                    .frame(width: 96)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 8)
+                    .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+            }
+            if split.count > 2 {
+                Button("Remove part", systemImage: "minus.circle") { removePart(index) }
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func startSplit() {
         split = [SplitDraft(category: category), SplitDraft()]
         active = category == nil ? 0 : 1
         focused = split[0].id
         Telemetry.shared.log("split-started")
+    }
+
+    /// Reads the receipt and, when it adds up to the transaction, makes one
+    /// part per item with its share of the tax. When it doesn't, the receipt
+    /// is still kept and shown, and the split is left to do by hand.
+    private func read(_ file: ReceiptFile, from origin: String) async {
+        focused = nil
+        defer { reading = false }
+        receipt = file
+        do {
+            let reading = try await ReceiptReader.read(file)
+            switch reading.parts(matching: total) {
+            case .success(let parts):
+                kind = .expense
+                sign = 1
+                split = parts.map { SplitDraft(cents: $0.cents, label: $0.name) }
+                active = 0
+                Telemetry.shared.log("receipt-read", ["from": origin, "items": "\(parts.count)", "ok": "true"])
+            case .failure(let why):
+                problem = why.localizedDescription + " The receipt is kept; View receipt shows it while you split by hand."
+                Telemetry.shared.log("receipt-read", ["from": origin, "items": "\(reading.items.count)", "ok": "false", "why": why.code])
+            }
+        } catch {
+            problem = ReceiptProblem.unreadable.localizedDescription
+            Telemetry.shared.log("receipt-read", ["from": origin, "ok": "false", "why": "vision"])
+        }
     }
 
     private func addPart() {

@@ -63,7 +63,11 @@ struct EntryRow: View {
         if kind == .transfer { return "\(day) · Transfer" }
         let refund = entry.sign < 0 ? " (refund)" : ""
         if entry.isSplit {
-            let names = entry.parts.sorted { $0.order < $1.order }.compactMap { $0.category?.name }
+            // A receipt's eight items might be three categories; name each once.
+            var names: [String] = []
+            for name in entry.parts.sorted(by: { $0.order < $1.order }).compactMap({ $0.category?.name }) where !names.contains(name) {
+                names.append(name)
+            }
             return "\(day) · Split: \(names.joined(separator: ", "))\(refund)"
         }
         return "\(day) · \(entry.category?.name ?? kind.title)\(refund)"
@@ -78,6 +82,7 @@ struct EditEntrySheet: View {
     @State private var sign: Int
     @State private var category: Category?
     @State private var split: [SplitDraft]
+    @State private var receipt: ReceiptFile?
     @State private var problem: String?
 
     init(entry: LedgerEntry) {
@@ -86,6 +91,7 @@ struct EditEntrySheet: View {
         _sign = State(initialValue: entry.sign)
         _category = State(initialValue: entry.category)
         _split = State(initialValue: .from(entry))
+        _receipt = State(initialValue: entry.receipt?.file)
     }
 
     var body: some View {
@@ -98,7 +104,7 @@ struct EditEntrySheet: View {
                             .foregroundStyle(.secondary)
                     }
                     DecisionControls(kind: $kind, sign: $sign, category: $category, split: $split,
-                                     total: abs(entry.amountCents))
+                                     receipt: $receipt, total: abs(entry.amountCents))
                 }
                 .padding(20)
             }
@@ -109,8 +115,9 @@ struct EditEntrySheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         do {
-                            try context.record(entry, kind: kind, sign: sign, category: category, split: split)
-                            Telemetry.shared.log("edited", ["kind": kind.rawValue, "parts": "\(max(split.count, 1))"])
+                            try context.record(entry, kind: kind, sign: sign, category: category, split: split, receipt: receipt)
+                            Telemetry.shared.log("edited", ["kind": kind.rawValue, "parts": "\(max(split.count, 1))",
+                                                            "receipt": "\(receipt != nil)"])
                             dismiss()
                         } catch { problem = error.localizedDescription }
                     }
