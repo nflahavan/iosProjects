@@ -198,27 +198,24 @@ struct CategoriesScreen: View {
 
 /// A month's income against its spending, and the categories side by side.
 struct OverviewScreen: View {
-    @Query private var entries: [LedgerEntry]
+    @Environment(\.modelContext) private var context
+    /// Nil until the first adding-up comes back.
+    @State private var overview: Overview?
     @State private var month: String?
 
-    private var months: [String] {
-        Array(Set(entries.map { $0.day.monthKey })).sorted(by: >)
-    }
+    private var months: [String] { overview?.months ?? [] }
 
     private var totals: MonthTotals {
         guard let month = month ?? months.first else { return MonthTotals() }
-        return MonthTotals(month: month, items: entries.flatMap { entry in
-            entry.shares.map {
-                MonthTotals.Item(monthKey: entry.day.monthKey, kind: entry.kind, contribution: $0.contribution,
-                                 category: $0.category?.name)
-            }
-        })
+        return overview?.totals[month] ?? MonthTotals()
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                if months.isEmpty {
+                if overview == nil {
+                    ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
+                } else if months.isEmpty {
                     ContentUnavailableView("Nothing yet", systemImage: "chart.bar",
                                            description: Text("Import and review a CSV to see where the money went."))
                 } else {
@@ -247,6 +244,13 @@ struct OverviewScreen: View {
             }
             .navigationTitle("Overview")
             .screen("overview")
+            // Each time the tab is shown, so new decisions are counted.
+            .task {
+                let started = Date.now
+                overview = await LedgerReader(modelContainer: context.container).overview()
+                Telemetry.shared.log("overview-ready", ["seconds": String(format: "%.2f", Date.now.timeIntervalSince(started)),
+                                                        "months": "\(months.count)"])
+            }
         }
     }
 

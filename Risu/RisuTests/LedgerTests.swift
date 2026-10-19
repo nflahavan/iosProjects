@@ -248,12 +248,11 @@ struct SplitTests {
     }
 
     @Test("Each part counts in its own category, and as a use of it")
-    func totalsAndUses() throws {
+    func totalsAndUses() async throws {
         try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])
-        let items = entry.shares.map {
-            MonthTotals.Item(monthKey: entry.day.monthKey, kind: entry.kind, contribution: $0.contribution, category: $0.category?.name)
-        }
-        let totals = MonthTotals(month: "2026-10", items: items)
+        // Added up off the main thread, from its own context on the store.
+        let overview = await LedgerReader(modelContainer: context.container).overview()
+        let totals = try #require(overview.totals[overview.months.first ?? ""])
         #expect(totals.expenses == 15000)
         #expect(totals.expenseLines.map(\.name) == ["Groceries", "Household"])
         #expect(household.uses == 1)

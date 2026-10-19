@@ -248,3 +248,31 @@ nonisolated struct MonthTotals: Equatable, Sendable {
         self.expenseLines = lines(expense)
     }
 }
+
+/// Every month's totals, worked out together.
+nonisolated struct Overview: Equatable, Sendable {
+    /// Newest first.
+    var months: [String] = []
+    var totals: [String: MonthTotals] = [:]
+}
+
+/// Reads the ledger off the main thread, with its own context on the same
+/// store, so adding up a year of transactions never holds up the screen.
+/// It hands back plain values; the models stay on its side.
+@ModelActor
+actor LedgerReader {
+    func overview() -> Overview {
+        let entries = (try? modelContext.fetch(FetchDescriptor<LedgerEntry>())) ?? []
+        let byMonth = Dictionary(grouping: entries.flatMap(\.totalsItems), by: \.monthKey)
+        return Overview(months: byMonth.keys.sorted(by: >),
+                        totals: byMonth.mapValues { MonthTotals(month: $0[0].monthKey, items: $0) })
+    }
+}
+
+extension LedgerEntry {
+    /// What it adds to its month: one item, or one per split part.
+    var totalsItems: [MonthTotals.Item] {
+        let month = day.monthKey, kind = kind
+        return shares.map { MonthTotals.Item(monthKey: month, kind: kind, contribution: $0.contribution, category: $0.category?.name) }
+    }
+}
