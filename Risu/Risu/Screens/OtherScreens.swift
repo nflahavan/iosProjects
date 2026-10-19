@@ -199,45 +199,56 @@ struct CategoriesScreen: View {
 /// A month's income against its spending, and the categories side by side.
 struct OverviewScreen: View {
     @Environment(\.modelContext) private var context
-    /// Nil until the first adding-up comes back.
+    /// The last adding-up that came back; nil before the first.
     @State private var overview: Overview?
+    /// True while an adding-up is running. Figures shown meanwhile are the
+    /// previous ones, and are marked as such.
+    @State private var updating = false
+    @State private var problem: String?
     @State private var month: String?
+    /// Bumped by Try again, to rerun the task.
+    @State private var attempt = 0
 
     private var months: [String] { overview?.months ?? [] }
 
+    /// The month picked, if it still has transactions; otherwise the newest.
+    private var shownMonth: String? { month.flatMap { months.contains($0) ? $0 : nil } ?? months.first }
+
     private var totals: MonthTotals {
-        guard let month = month ?? months.first else { return MonthTotals() }
-        return overview?.totals[month] ?? MonthTotals()
+        shownMonth.flatMap { overview?.totals[$0] } ?? MonthTotals()
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                if overview == nil {
-                    ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
+                if let problem, overview == nil {
+                    ContentUnavailableView {
+                        Label("Couldn't add up your transactions", systemImage: "exclamationmark.triangle")
+                    } description: { Text(problem) } actions: {
+                        Button("Try again") { attempt += 1 }.buttonStyle(.borderedProminent)
+                    }
+                } else if overview == nil {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Adding up your transactions…").foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 80)
                 } else if months.isEmpty {
                     ContentUnavailableView("Nothing yet", systemImage: "chart.bar",
                                            description: Text("Import and review a CSV to see where the money went."))
                 } else {
                     VStack(alignment: .leading, spacing: 24) {
-                        Picker("Month", selection: Binding(get: { month ?? months.first ?? "" },
-                                                           set: { month = $0; Telemetry.shared.log("month", ["to": $0]) })) {
-                            ForEach(months, id: \.self) { Text(monthTitle($0)).tag($0) }
+                        HStack {
+                            Picker("Month", selection: Binding(get: { shownMonth ?? "" },
+                                                               set: { month = $0; Telemetry.shared.log("month", ["to": $0]) })) {
+                                ForEach(months, id: \.self) { Text(monthTitle($0)).tag($0) }
+                            }
+                            .pickerStyle(.menu)
+                            Spacer()
+                            status
                         }
-                        .pickerStyle(.menu)
-
-                        HStack(spacing: 12) {
-                            tile("Income", totals.income, .green)
-                            tile("Spending", totals.expenses, .primary)
-                            tile("Net", totals.net, totals.net >= 0 ? .green : .red, signed: true)
-                        }
-                        if totals.unreviewed > 0 {
-                            Label("\(totals.unreviewed) transactions this month aren't reviewed yet, so they aren't counted.",
-                                  systemImage: "rectangle.stack")
-                                .font(.callout).foregroundStyle(.orange)
-                        }
-                        bars("Spending by category", totals.expenseLines, Color.accentColor)
-                        bars("Income by category", totals.incomeLines, .green)
+                        figures
                     }
                     .padding(20)
                 }
@@ -245,13 +256,64 @@ struct OverviewScreen: View {
             .navigationTitle("Overview")
             .screen("overview")
             // Each time the tab is shown, so new decisions are counted.
-            .task {
-                let started = Date.now
-                overview = await LedgerReader(modelContainer: context.container).overview()
-                Telemetry.shared.log("overview-ready", ["seconds": String(format: "%.2f", Date.now.timeIntervalSince(started)),
-                                                        "months": "\(months.count)"])
-            }
+            .task(id: attempt) { await refresh() }
         }
+    }
+
+    /// What's on screen and how current it is: updating, or couldn't update.
+    @ViewBuilder
+    private var status: some View {
+        if updating {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Updating…")
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        } else if problem != nil {
+            Button("Couldn't update · Try again", systemImage: "exclamationmark.triangle") { attempt += 1 }
+                .font(.caption).foregroundStyle(.orange)
+        }
+    }
+
+    /// The month's numbers. While an update runs they're last time's, so
+    /// they're dimmed until the new ones arrive.
+    private var figures: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(spacing: 12) {
+                tile("Income", totals.income, .green)
+                tile("Spending", totals.expenses, .primary)
+                tile("Net", totals.net, totals.net >= 0 ? .green : .red, signed: true)
+            }
+            if totals.unreviewed > 0 {
+                Label("\(totals.unreviewed) transactions this month aren't reviewed yet, so they aren't counted.",
+                      systemImage: "rectangle.stack")
+                    .font(.callout).foregroundStyle(.orange)
+            }
+            bars("Spending by category", totals.expenseLines, Color.accentColor)
+            bars("Income by category", totals.incomeLines, .green)
+        }
+        .opacity(updating ? 0.45 : 1)
+        .animation(.default, value: updating)
+    }
+
+    private func refresh() async {
+        updating = true
+        problem = nil
+        let started = Date.now
+        do {
+            let fresh = try await LedgerReader(modelContainer: context.container).overview()
+            // Left the tab, or Try again, meanwhile: a newer read is under
+            // way and owns `updating`, so this one leaves everything alone.
+            guard !Task.isCancelled else { return }
+            overview = fresh
+            Telemetry.shared.log("overview-ready", ["seconds": String(format: "%.2f", Date.now.timeIntervalSince(started)),
+                                                    "months": "\(fresh.months.count)"])
+        } catch {
+            guard !Task.isCancelled else { return }
+            problem = error.localizedDescription
+            Telemetry.shared.log("overview-failed")
+        }
+        updating = false
     }
 
     private func tile(_ title: String, _ cents: Int, _ color: Color, signed: Bool = false) -> some View {

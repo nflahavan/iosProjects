@@ -259,10 +259,16 @@ nonisolated struct Overview: Equatable, Sendable {
 /// Reads the ledger off the main thread, with its own context on the same
 /// store, so adding up a year of transactions never holds up the screen.
 /// It hands back plain values; the models stay on its side.
+///
+/// It sees what's been saved, and every change in `Ledger` saves before it
+/// returns. Make a new reader for each read: a context kept around keeps
+/// the objects it already loaded, and could answer with old ones.
 @ModelActor
 actor LedgerReader {
-    func overview() -> Overview {
-        let entries = (try? modelContext.fetch(FetchDescriptor<LedgerEntry>())) ?? []
+    /// Throws rather than answering with nothing: an empty overview would
+    /// say there are no transactions when they couldn't be read.
+    func overview() throws -> Overview {
+        let entries = try modelContext.fetch(FetchDescriptor<LedgerEntry>())
         let byMonth = Dictionary(grouping: entries.flatMap(\.totalsItems), by: \.monthKey)
         return Overview(months: byMonth.keys.sorted(by: >),
                         totals: byMonth.mapValues { MonthTotals(month: $0[0].monthKey, items: $0) })

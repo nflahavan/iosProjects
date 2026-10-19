@@ -251,7 +251,7 @@ struct SplitTests {
     func totalsAndUses() async throws {
         try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])
         // Added up off the main thread, from its own context on the store.
-        let overview = await LedgerReader(modelContainer: context.container).overview()
+        let overview = try await LedgerReader(modelContainer: context.container).overview()
         let totals = try #require(overview.totals[overview.months.first ?? ""])
         #expect(totals.expenses == 15000)
         #expect(totals.expenseLines.map(\.name) == ["Groceries", "Household"])
