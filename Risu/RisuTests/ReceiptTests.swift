@@ -89,6 +89,14 @@ struct ReceiptTests {
         #expect(ReceiptReader.unraisingCents("Total: $54.07") == "Total: $54.07")
     }
 
+    @Test func aCouponOnTheOrderComesOffEveryItem() throws {
+        // An online order: shipping on and off again, a coupon, then tax.
+        let lines = ["Kite  $10.00", "Glue  $20.00", "Item(s) Subtotal: $30.00", "Shipping: $2.99",
+                     "Free Shipping: -$2.99", "Coupon Savings: -$3.00", "Estimated tax: $1.50", "Grand Total: $28.50"]
+        #expect(try ReceiptReading(lines: lines).parts(matching: 2850).get().map(\.cents) == [950, 1900])
+        #expect(ReceiptReading.spread(-150, by: [1000, 2000]) == [-50, -100])
+    }
+
     @Test func couponsComeOffTheirItem() {
         let reading = ReceiptReading(lines: ["Coffee  $9.00", "Coupon  -$2.00", "Total  $7.00"])
         #expect(reading.items == [.init(name: "Coffee", cents: 700, taxed: nil)])

@@ -46,36 +46,42 @@ nonisolated struct ReceiptReading: Equatable, Sendable {
         }
     }
 
-    /// The parts a split would get: each item with its share of the tax.
-    /// Fails, rather than guessing, when the items don't account for the
-    /// receipt, or the receipt isn't the bank's amount.
+    /// The parts a split would get: each item with its share of whatever
+    /// lies between the items and the total. Fails, rather than guessing,
+    /// when the items don't account for the receipt, or the receipt isn't
+    /// the bank's amount.
     ///
     /// The card charge is the anchor. With a subtotal the items must match
-    /// it, and the tax is whatever the total adds; a printed tax line a cent
-    /// off (stores that round tax per item) doesn't matter. Without one, the
-    /// printed tax is the only check on the items, so it must come within
-    /// that cent.
+    /// it, and the gap to the total (tax, shipping, a coupon, so it can be
+    /// negative) is spread over them; a printed tax line a cent off (stores
+    /// that round tax per item) doesn't matter. Without a subtotal the
+    /// printed tax is the only check on the items, so the gap must be that
+    /// tax, within the cent.
     func parts(matching bankTotal: Int) -> Result<[(name: String, cents: Int)], ReceiptProblem> {
         guard !items.isEmpty, items.allSatisfy({ $0.cents > 0 }) else { return .failure(.noItems) }
         guard let total else { return .failure(.noTotal) }
         let itemSum = items.reduce(0) { $0 + $1.cents }
         if let subtotal, subtotal != itemSum { return .failure(.itemsDontAddUp(items: itemSum, subtotal: subtotal)) }
-        let tax = total - itemSum
-        guard tax >= 0, subtotal != nil || abs(tax - self.tax) <= 1 else { return .failure(.taxDoesntAddUp) }
+        let gap = total - itemSum
+        guard total > 0, subtotal != nil || abs(gap - tax) <= 1 else { return .failure(.taxDoesntAddUp) }
         guard total == bankTotal else { return .failure(.otherAmount(receipt: total, bank: bankTotal)) }
 
-        // Tax goes on every line but those marked untaxed. A line with no
-        // mark is more likely a mark that didn't read than an untaxed item.
-        var weights = items.map { $0.taxed == false ? 0 : $0.cents }
+        // Added tax goes on every line but those marked untaxed: a line with
+        // no mark is more likely a mark that didn't read than an untaxed item.
+        // A gap that takes money off, like a coupon, comes off every line.
+        var weights = items.map { gap > 0 && $0.taxed == false ? 0 : $0.cents }
         if weights.allSatisfy({ $0 == 0 }) { weights = items.map(\.cents) }
-        let shares = Self.spread(tax, by: weights)
-        return .success(zip(items, shares).map { ($0.name, $0.cents + $1) })
+        let parts = zip(items, Self.spread(gap, by: weights)).map { ($0.name, $0.cents + $1) }
+        guard parts.allSatisfy({ $0.1 > 0 }) else { return .failure(.taxDoesntAddUp) }
+        return .success(parts)
     }
 
     /// Splits `amount` cents in proportion to `weights`, to the cent: each
     /// share rounds down, then the leftover cents go to the shares that lost
-    /// the most in rounding (the earlier one on a tie).
+    /// the most in rounding (the earlier one on a tie). A negative amount
+    /// is spread the same way, taken off instead of added.
     static func spread(_ amount: Int, by weights: [Int]) -> [Int] {
+        if amount < 0 { return spread(-amount, by: weights).map { -$0 } }
         let whole = weights.reduce(0, +)
         guard whole > 0 else { return weights.map { _ in 0 } }
         var shares = weights.map { amount * $0 / whole }
