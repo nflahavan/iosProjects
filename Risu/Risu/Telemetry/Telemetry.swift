@@ -22,7 +22,7 @@ final class Telemetry {
     private(set) var screen = "launch"
     private var stack: [String] = []
     let fileURL: URL
-    private let folder = URL.documentsDirectory.appending(path: "Telemetry")
+    nonisolated static let folder = URL.documentsDirectory.appending(path: "Telemetry")
     private let session = UUID().uuidString.prefix(8)
     private var lines: [String] = []
     private let started = Date()
@@ -30,13 +30,14 @@ final class Telemetry {
     private init() {
         let stamp = Date.now.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false)
             .dateTimeSeparator(.standard).timeSeparator(.omitted))
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        fileURL = folder.appending(path: "risu-\(stamp)-\(session).jsonl")
+        try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+        fileURL = Self.folder.appending(path: "risu-\(stamp)-\(session).jsonl")
     }
 
     /// Every launch's log, oldest first, as one file. Each line names its
-    /// launch in `session`, so they stay apart when read.
-    func exportAll() -> URL {
+    /// launch in `session`, so they stay apart when read. Off the main
+    /// actor: the logs grow with every launch.
+    @concurrent nonisolated static func exportAll() async -> URL {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         // File names start with the launch time, so their order is time order.
         let logs = files.filter { $0.pathExtension == "jsonl" }.sorted { $0.lastPathComponent < $1.lastPathComponent }

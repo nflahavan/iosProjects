@@ -284,18 +284,28 @@ struct OverviewScreen: View {
 /// Telemetry, and where it goes.
 struct SettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var log = Telemetry.shared.exportAll()
+    @State private var preparing = false
+    @State private var exported: ExportedLog?
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    ShareLink(item: log) {
-                        Label("Export the usage log", systemImage: "square.and.arrow.up")
-                    }
-                    .simultaneousGesture(TapGesture().onEnded {
+                    // A plain button, not a ShareLink: it shows the press at once,
+                    // where a ShareLink sat still until the share sheet was ready.
+                    Button {
                         Telemetry.shared.log("export-log")
-                        log = Telemetry.shared.exportAll()
-                    })
+                        preparing = true
+                        Task {
+                            exported = ExportedLog(url: await Telemetry.exportAll())
+                            preparing = false
+                        }
+                    } label: {
+                        HStack {
+                            Label(preparing ? "Preparing…" : "Export the usage log", systemImage: "square.and.arrow.up")
+                            if preparing { Spacer(); ProgressView() }
+                        }
+                    }
+                    .disabled(preparing)
                 } header: { Text("Usage log") } footer: {
                     Text("Records screens, taps and choices, never a transaction's description or amount. It stays on this phone unless you export it.")
                 }
@@ -305,9 +315,25 @@ struct SettingsScreen: View {
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .sheet(item: $exported) { ShareSheet(items: [$0.url]).presentationDetents([.medium, .large]) }
             .screen("settings")
         }
     }
+}
+
+struct ExportedLog: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// The system share sheet, opened when we choose rather than when a
+/// ShareLink is tapped.
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 func monthTitle(_ key: String) -> String {
