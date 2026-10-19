@@ -51,9 +51,9 @@ nonisolated struct ReceiptReading: Equatable, Sendable {
         guard total == bankTotal else { return .failure(.otherAmount(receipt: total, bank: bankTotal)) }
         guard items.allSatisfy({ $0.cents > 0 }) else { return .failure(.noItems) }
 
-        // Tax goes on the taxed lines when the receipt marks them, else all.
-        let marked = items.contains { $0.taxed != nil }
-        let weights = items.map { marked && $0.taxed != true ? 0 : $0.cents }
+        // Tax goes on every line but those marked untaxed. A line with no
+        // mark is more likely a mark that didn't read than an untaxed item.
+        let weights = items.map { $0.taxed == false ? 0 : $0.cents }
         let shares = Self.spread(tax, by: weights)
         return .success(zip(items, shares).map { ($0.name, $0.cents + $1) })
     }

@@ -50,6 +50,13 @@ struct ReceiptTests {
         #expect(ReceiptReading.spread(5, by: [0, 0]) == [0, 0])
     }
 
+    @Test func aMarkThatDidntReadStillTakesTax() throws {
+        var lines = store
+        lines[9] = "445500210  Kite  $8.00"
+        let parts = try ReceiptReading(lines: lines).parts(matching: 3193).get()
+        #expect(parts.map(\.cents) == [1266, 633, 450, 844])
+    }
+
     @Test func unmarkedReceiptsTaxEverything() throws {
         let lines = ["Soap  $3.00", "Sponge  $1.00", "Tax  $0.40", "Total  $4.40"]
         let parts = try ReceiptReading(lines: lines).parts(matching: 440).get()
@@ -81,9 +88,18 @@ struct ReceiptTests {
         #expect(lines == ["Bread Knife  $12.00", "TOTAL  $12.00"])
     }
 
-    /// The whole path, Vision included: draw a receipt, read it back.
+    @Test func longReceiptsAreReadInOverlappingTiles() {
+        #expect(ReceiptReader.tiles(width: 600, height: 700).map(\.keeps) == [0..<700])
+        let tiles = ReceiptReader.tiles(width: 600, height: 2000)
+        #expect(tiles.map(\.rect.minY) == [0, 450, 900, 1350, 1800])
+        // Every row belongs to exactly one tile.
+        #expect(tiles.map(\.keeps) == [0..<525, 525..<975, 975..<1425, 1425..<1875, 1875..<2000])
+    }
+
+    /// The whole path, Vision included: draw a long receipt, read it back.
     @Test func readsADrawnReceipt() async throws {
-        let rows: [(String, String)] = [
+        let notes = (1...20).map { ("Thank you for shopping, visit \($0)", "") }
+        let rows: [(String, String)] = notes + [
             ("CORNER STORE", ""), ("Bread Knife  T", "$12.00"), ("Tea Towels  T", "$6.00"),
             ("Oat Milk  N", "$4.50"), ("SUBTOTAL", "$22.50"), ("TAX", "$0.99"), ("TOTAL", "$23.49"),
         ]

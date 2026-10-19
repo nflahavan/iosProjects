@@ -26,23 +26,68 @@ nonisolated struct ReceiptFile: Equatable, Sendable {
 /// Reading a receipt's text on the phone, with Vision. Nothing leaves it.
 nonisolated enum ReceiptReader {
     static func read(_ file: ReceiptFile) async throws -> ReceiptReading {
+        ReceiptReading(lines: try await lines(of: file))
+    }
+
+    /// The receipt's text, a row at a time, top to bottom.
+    static func lines(of file: ReceiptFile) async throws -> [String] {
         let pages = file.pages()
         guard !pages.isEmpty else { throw ReceiptProblem.unreadable }
         var lines: [String] = []
         for page in pages {
-            var request = RecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            // Item names are abbreviations; "correcting" them makes them worse.
-            request.usesLanguageCorrection = false
-            let observations = try await request.perform(on: page)
-            lines += self.lines(observations.compactMap { observation in
-                guard let text = observation.topCandidates(1).first?.string else { return nil }
-                let ys = [observation.topLeft.y, observation.topRight.y, observation.bottomLeft.y, observation.bottomRight.y]
-                return Fragment(text: text, minX: min(observation.topLeft.x, observation.bottomLeft.x),
-                                midY: ys.reduce(0, +) / 4, height: ys.max()! - ys.min()!)
-            })
+            var fragments: [Fragment] = []
+            for tile in tiles(width: page.width, height: page.height) {
+                guard let image = page.cropping(to: tile.rect) else { continue }
+                fragments += try await read(image).compactMap { fragment in
+                    // Back into the page's coordinates, keeping only the rows
+                    // in this tile's middle; the overlap belongs to the next.
+                    let y = tile.rect.minY + (1 - fragment.midY) * tile.rect.height
+                    guard tile.keeps.contains(y) else { return nil }
+                    let scale = tile.rect.height / Double(page.height)
+                    return Fragment(text: fragment.text,
+                                    minX: fragment.minX * tile.rect.width / Double(page.width),
+                                    midY: 1 - y / Double(page.height),
+                                    height: fragment.height * scale)
+                }
+            }
+            lines += self.lines(fragments)
         }
-        return ReceiptReading(lines: lines)
+        return lines
+    }
+
+    /// A long receipt read whole is shrunk to Vision's input size until its
+    /// small print is unreadable, so it's read in square tiles down the page.
+    /// Neighbouring tiles overlap by a quarter, and each keeps the rows whose
+    /// middles fall in its own stretch, so a row cut by one tile's edge is
+    /// read whole by the next.
+    static func tiles(width: Int, height: Int) -> [(rect: CGRect, keeps: Range<Double>)] {
+        let side = Double(width), whole = Double(height)
+        guard whole > side * 1.25 else { return [(CGRect(x: 0, y: 0, width: side, height: whole), 0..<whole)] }
+        let step = side * 0.75
+        var tiles: [(rect: CGRect, keeps: Range<Double>)] = []
+        var top = 0.0
+        while true {
+            let bottom = min(top + side, whole)
+            let last = bottom >= whole
+            let start = top == 0 ? 0 : top + (side - step) / 2
+            let end = last ? whole : top + side - (side - step) / 2
+            tiles.append((CGRect(x: 0, y: top, width: side, height: bottom - top), start..<end))
+            if last { return tiles }
+            top += step
+        }
+    }
+
+    private static func read(_ image: CGImage) async throws -> [Fragment] {
+        var request = RecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        // Item names are abbreviations; "correcting" them makes them worse.
+        request.usesLanguageCorrection = false
+        return try await request.perform(on: image).compactMap { observation in
+            guard let text = observation.topCandidates(1).first?.string else { return nil }
+            let ys = [observation.topLeft.y, observation.topRight.y, observation.bottomLeft.y, observation.bottomRight.y]
+            return Fragment(text: text, minX: min(observation.topLeft.x, observation.bottomLeft.x),
+                            midY: ys.reduce(0, +) / 4, height: ys.max()! - ys.min()!)
+        }
     }
 
     /// One piece of recognised text and where it sat, in Vision's
