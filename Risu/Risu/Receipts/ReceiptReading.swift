@@ -15,6 +15,13 @@ nonisolated struct ReceiptReading: Equatable, Sendable {
     var tax = 0
     var total: Int?
 
+    init(items: [Item], subtotal: Int?, tax: Int, total: Int?) {
+        self.items = items
+        self.subtotal = subtotal
+        self.tax = tax
+        self.total = total
+    }
+
     /// Reads receipt lines top to bottom. Lines with a price before the
     /// subtotal are items; department headings, savings notes and anything
     /// after the total are left out.
@@ -40,20 +47,27 @@ nonisolated struct ReceiptReading: Equatable, Sendable {
     }
 
     /// The parts a split would get: each item with its share of the tax.
-    /// Fails, rather than guessing, when the receipt doesn't add up, or
-    /// doesn't come to the bank's amount.
+    /// Fails, rather than guessing, when the items don't account for the
+    /// receipt, or the receipt isn't the bank's amount.
+    ///
+    /// The card charge is the anchor. With a subtotal the items must match
+    /// it, and the tax is whatever the total adds; a printed tax line a cent
+    /// off (stores that round tax per item) doesn't matter. Without one, the
+    /// printed tax is the only check on the items, so it must come within
+    /// that cent.
     func parts(matching bankTotal: Int) -> Result<[(name: String, cents: Int)], ReceiptProblem> {
-        guard !items.isEmpty else { return .failure(.noItems) }
+        guard !items.isEmpty, items.allSatisfy({ $0.cents > 0 }) else { return .failure(.noItems) }
         guard let total else { return .failure(.noTotal) }
         let itemSum = items.reduce(0) { $0 + $1.cents }
         if let subtotal, subtotal != itemSum { return .failure(.itemsDontAddUp(items: itemSum, subtotal: subtotal)) }
-        guard itemSum + tax == total else { return .failure(.taxDoesntAddUp) }
+        let tax = total - itemSum
+        guard tax >= 0, subtotal != nil || abs(tax - self.tax) <= 1 else { return .failure(.taxDoesntAddUp) }
         guard total == bankTotal else { return .failure(.otherAmount(receipt: total, bank: bankTotal)) }
-        guard items.allSatisfy({ $0.cents > 0 }) else { return .failure(.noItems) }
 
         // Tax goes on every line but those marked untaxed. A line with no
         // mark is more likely a mark that didn't read than an untaxed item.
-        let weights = items.map { $0.taxed == false ? 0 : $0.cents }
+        var weights = items.map { $0.taxed == false ? 0 : $0.cents }
+        if weights.allSatisfy({ $0 == 0 }) { weights = items.map(\.cents) }
         let shares = Self.spread(tax, by: weights)
         return .success(zip(items, shares).map { ($0.name, $0.cents + $1) })
     }

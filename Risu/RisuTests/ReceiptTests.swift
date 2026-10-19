@@ -73,6 +73,22 @@ struct ReceiptTests {
         #expect(ReceiptReading(lines: ["Soap  $3.00"]).parts(matching: 300).problem == (.noTotal))
     }
 
+    @Test func theCardChargeIsTheAnchorNotThePrintedTax() throws {
+        // Tax rounded per item: the printed tax is a cent short of the total.
+        let withSubtotal = ["Soap  $3.00", "Sponge  $1.00", "Subtotal  $4.00", "Tax  $0.39", "Total  $4.40"]
+        #expect(try ReceiptReading(lines: withSubtotal).parts(matching: 440).get().map(\.cents) == [330, 110])
+        // Without a subtotal the printed tax is the only check: a cent passes, more doesn't.
+        #expect((try? ReceiptReading(lines: ["Soap  $3.00", "Tax  $0.29", "Total  $3.30"]).parts(matching: 330).get()) != nil)
+        #expect(ReceiptReading(lines: ["Soap  $3.00", "Tax  $0.10", "Total  $3.30"]).parts(matching: 330).problem == .taxDoesntAddUp)
+    }
+
+    @Test func raisedCentsFromAPDFArePutBack() {
+        #expect(ReceiptReader.unraisingCents("$ 50  4") == "$4.50")
+        #expect(ReceiptReader.unraisingCents("$ 99  18  details, visit the") == "$18.99  details, visit the")
+        #expect(ReceiptReader.unraisingCents("Return value: $4.49 / Qty.") == "Return value: $4.49 / Qty.")
+        #expect(ReceiptReader.unraisingCents("Total: $54.07") == "Total: $54.07")
+    }
+
     @Test func couponsComeOffTheirItem() {
         let reading = ReceiptReading(lines: ["Coffee  $9.00", "Coupon  -$2.00", "Total  $7.00"])
         #expect(reading.items == [.init(name: "Coffee", cents: 700, taxed: nil)])
@@ -117,7 +133,7 @@ struct ReceiptTests {
                 (row.1 as NSString).draw(at: CGPoint(x: size.width - 30 - width, y: y), withAttributes: [.font: font])
             }
         }
-        let reading = try await ReceiptReader.read(ReceiptFile(data: image.pngData()!, isPDF: false))
+        let reading = ReceiptReading(lines: try await ReceiptReader.lines(of: ReceiptFile(data: image.pngData()!, isPDF: false)))
         #expect(reading.items.map(\.cents) == [1200, 600, 450])
         #expect(reading.total == 2349)
         let parts = try reading.parts(matching: 2349).get()

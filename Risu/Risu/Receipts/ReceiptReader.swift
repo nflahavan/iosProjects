@@ -25,12 +25,36 @@ nonisolated struct ReceiptFile: Equatable, Sendable {
 
 /// Reading a receipt's text on the phone, with Vision. Nothing leaves it.
 nonisolated enum ReceiptReader {
-    static func read(_ file: ReceiptFile) async throws -> ReceiptReading {
-        ReceiptReading(lines: try await lines(of: file))
+    /// How a receipt was made sense of, for the log.
+    enum Method: String { case rules, model }
+
+    /// The split for a receipt, by its own rules first: instant, and exact
+    /// to test. When they can't make it add up (a store or web page laid out
+    /// some other way), the on-device model reads the same text. Either way
+    /// the result passes the same check before it reaches the split. The
+    /// model gets a second try, since it sometimes skips a line.
+    static func parts(for file: ReceiptFile, matching bankTotal: Int) async throws
+        -> (result: Result<[(name: String, cents: Int)], ReceiptProblem>, method: Method, items: Int) {
+        let lines = try await lines(of: file)
+        let rules = ReceiptReading(lines: lines)
+        var best = (result: rules.parts(matching: bankTotal), method: Method.rules, items: rules.items.count)
+        guard case .failure = best.result, ReceiptModel.isAvailable else { return best }
+        for greedy in [true, false] {
+            guard let reading = try? await ReceiptModel.read(lines, fallback: rules, greedy: greedy) else { continue }
+            best = (reading.parts(matching: bankTotal), .model, reading.items.count)
+            if case .success = best.result { break }
+        }
+        return best
     }
 
-    /// The receipt's text, a row at a time, top to bottom.
+    /// The receipt's text, a row at a time, top to bottom. A PDF that holds
+    /// real text (most emailed or saved receipts) gives it exactly; anything
+    /// else is read off the image.
     static func lines(of file: ReceiptFile) async throws -> [String] {
+        if file.isPDF, let document = PDFDocument(data: file.data) {
+            let lines = (0..<document.pageCount).compactMap(document.page(at:)).flatMap(textLines).map(unraisingCents)
+            if lines.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) { return lines }
+        }
         let pages = file.pages()
         guard !pages.isEmpty else { throw ReceiptProblem.unreadable }
         var lines: [String] = []
@@ -53,6 +77,26 @@ nonisolated enum ReceiptReader {
             lines += self.lines(fragments)
         }
         return lines
+    }
+
+    /// Prices with raised cents ($4⁵⁰, common on stores' order pages) come
+    /// out of a PDF as "$ 50  4": the dollar sign and cents on the raised
+    /// line first, the dollars after. Put back as "$4.50".
+    static func unraisingCents(_ line: String) -> String {
+        line.replacing(#/\$ ?(\d{2})\s+(\d{1,5})(?![\d.])/#) { "$\($0.output.2).\($0.output.1)" }
+    }
+
+    /// A PDF page's own text, put back into rows the same way as Vision's.
+    private static func textLines(_ page: PDFPage) -> [String] {
+        let box = page.bounds(for: .mediaBox)
+        guard box.width > 0, box.height > 0,
+              let selections = page.selection(for: box)?.selectionsByLine() else { return [] }
+        return lines(selections.compactMap { selection in
+            guard let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+            let rect = selection.bounds(for: page)
+            return Fragment(text: text, minX: (rect.minX - box.minX) / box.width,
+                            midY: (rect.midY - box.minY) / box.height, height: rect.height / box.height)
+        })
     }
 
     /// A long receipt read whole is shrunk to Vision's input size until its

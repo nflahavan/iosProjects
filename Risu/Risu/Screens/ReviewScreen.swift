@@ -596,18 +596,24 @@ struct DecisionControls: View {
         defer { reading = false }
         receipt = file
         do {
-            let reading = try await ReceiptReader.read(file)
-            switch reading.parts(matching: total) {
+            let started = Date.now
+            let read = try await ReceiptReader.parts(for: file, matching: total)
+            var fields = ["from": origin, "pdf": "\(file.isPDF)", "via": read.method.rawValue, "items": "\(read.items)",
+                          "seconds": String(format: "%.1f", Date.now.timeIntervalSince(started))]
+            if !ReceiptModel.isAvailable { fields["model"] = ReceiptModel.unavailableReason }
+            switch read.result {
             case .success(let parts):
                 kind = .expense
                 sign = 1
                 split = parts.map { SplitDraft(cents: $0.cents, label: $0.name) }
                 active = 0
-                Telemetry.shared.log("receipt-read", ["from": origin, "items": "\(parts.count)", "ok": "true"])
+                fields["ok"] = "true"
             case .failure(let why):
                 problem = why.localizedDescription + " The receipt is kept; View receipt shows it while you split by hand."
-                Telemetry.shared.log("receipt-read", ["from": origin, "items": "\(reading.items.count)", "ok": "false", "why": why.code])
+                fields["ok"] = "false"
+                fields["why"] = why.code
             }
+            Telemetry.shared.log("receipt-read", fields)
         } catch {
             problem = ReceiptProblem.unreadable.localizedDescription
             Telemetry.shared.log("receipt-read", ["from": origin, "ok": "false", "why": "vision"])
