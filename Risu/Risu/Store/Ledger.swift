@@ -63,11 +63,15 @@ extension ModelContext {
         return try fetch(descriptor).first
     }
 
+    /// Rows waiting, newest date first: what you just imported, and the
+    /// spending you remember best, comes up before years of backlog. Within
+    /// a day, the latest file first, then its own order.
     /// Nonisolated so `LedgerReader` can run it on its own context.
     nonisolated func reviewQueue() throws -> [LedgerEntry] {
         try fetch(FetchDescriptor<LedgerEntry>(predicate: #Predicate { $0.kindRaw == nil })).sorted {
+            if $0.dayKey != $1.dayKey { return $0.dayKey > $1.dayKey }
             let a = $0.file?.importedAt ?? .distantPast, b = $1.file?.importedAt ?? .distantPast
-            return a == b ? $0.row < $1.row : a < b
+            return a == b ? $0.row < $1.row : a > b
         }
     }
 
@@ -306,7 +310,7 @@ nonisolated struct ReviewSnapshot: Equatable, Sendable {
         var id: PersistentIdentifier
         var source: String
     }
-    /// In the order they'll be reviewed.
+    /// In the order they'll be reviewed: newest date first.
     var waiting: [Row]
     /// Newest decision first.
     var decided: [Row]

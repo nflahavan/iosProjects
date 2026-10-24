@@ -51,7 +51,10 @@ final class Telemetry {
         let info = Bundle.main.infoDictionary
         log("launch", ["build": "\(info?["CFBundleShortVersionString"] ?? "?") (\(info?["CFBundleVersion"] ?? "?"))",
                        "device": UIDevice.current.model,
-                       "os": UIDevice.current.systemVersion])
+                       "os": UIDevice.current.systemVersion,
+                       // iOS starts apps ahead of time to open faster; such a
+                       // launch logs nothing else until you actually open it.
+                       "prewarm": "\(ProcessInfo.processInfo.environment["ActivePrewarm"] == "1")"])
     }
 
     func entered(_ name: String) {

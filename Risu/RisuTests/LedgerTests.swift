@@ -32,7 +32,7 @@ struct LedgerTests {
         oops,BAD,1
         """), into: card)
         #expect(second == ImportSummary(new: 1, alreadyHere: 1, unreadable: 1))
-        #expect(try context.reviewQueue().map(\.text) == ["COFFEE", "GROCER", "GAS"])
+        #expect(try context.reviewQueue().map(\.text) == ["GAS", "GROCER", "COFFEE"])
     }
 
     @Test("The review reads its rows off the main thread, by account too")
@@ -49,7 +49,7 @@ struct LedgerTests {
         }
 
         var snapshot = try await reader()
-        #expect(try texts(snapshot.waiting) == ["COFFEE", "GAS", "RENT"])
+        #expect(try texts(snapshot.waiting) == ["RENT", "GAS", "COFFEE"])
         #expect(try texts(snapshot.waiting(in: "Bank")) == ["RENT"])
 
         // Deciding moves the row at once, to where the next read puts it.
@@ -60,6 +60,14 @@ struct LedgerTests {
         #expect(snapshot.waiting(in: "Bank").isEmpty)
         #expect(try texts(snapshot.decided(in: "Bank")) == ["RENT"])
         #expect(snapshot.decided(in: "Card").isEmpty)
+    }
+
+    @Test("What you just imported comes up first, ahead of older rows still waiting")
+    func newestFirst() throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "old.csv", contents: csv("01/05/2026,OLD A,-1.00\n01/06/2026,OLD B,-1.00"), into: card)
+        try context.importFile(named: "new.csv", contents: csv("10/20/2026,NEW A,-1.00\n10/21/2026,NEW B,-1.00"), into: card)
+        #expect(try context.reviewQueue().map(\.text) == ["NEW B", "NEW A", "OLD B", "OLD A"])
     }
 
     @Test("Another source's identical row isn't a duplicate")
@@ -197,13 +205,13 @@ struct GoingBackTests {
             try context.decide(entry, kind: .expense, sign: 1, category: food)
             try? await Task.sleep(for: .milliseconds(5))
         }
-        #expect(try context.recentlyDecided().map(\.text) == ["C", "B", "A"])
+        #expect(try context.recentlyDecided().map(\.text) == ["A", "B", "C"])
 
         let fun = try context.category(named: "Fun", kind: .expense)
         let b = try #require(try context.recentlyDecided().first { $0.text == "B" })
         try context.decide(b, kind: .expense, sign: 1, category: fun)
         #expect(b.category === fun)
-        #expect(try context.recentlyDecided().map(\.text) == ["C", "B", "A"])
+        #expect(try context.recentlyDecided().map(\.text) == ["A", "B", "C"])
     }
 }
 
