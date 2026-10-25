@@ -267,6 +267,29 @@ struct ReviewScreen: View {
     }
 }
 
+/// Which categories match what's typed, best first: a name that starts
+/// with it, then one with a word that does, then one that has it anywhere.
+/// Within each, the order given (most used first) is kept. Case and
+/// accents don't matter. Returns indices into `names`.
+nonisolated enum CategorySearch {
+    static func rank(_ names: [String], for query: String) -> [Int] {
+        let typed = query.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return Array(names.indices) }
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        func tier(_ name: String) -> Int? {
+            if name.range(of: typed, options: options.union(.anchored)) != nil { return 0 }
+            if name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .contains(where: { $0.range(of: typed, options: options.union(.anchored)) != nil }) { return 1 }
+            return name.range(of: typed, options: options) != nil ? 2 : nil
+        }
+        var tiers: [[Int]] = [[], [], []]
+        for index in names.indices {
+            if let t = tier(names[index]) { tiers[t].append(index) }
+        }
+        return tiers.flatMap { $0 }
+    }
+}
+
 /// A waiting row in the review's strip: enough to know whether it's one
 /// you can answer now. Looked up only when scrolled into view.
 struct RowTile: View {
@@ -552,6 +575,9 @@ struct DecisionControls: View {
     @State private var reading = false
     @State private var showingReceipt = false
     @FocusState private var focused: UUID?
+    /// What's typed in the category search; empty shows every chip.
+    @State private var query = ""
+    @FocusState private var searching: Bool
 
     private var splitting: Bool { !split.isEmpty }
 
@@ -660,9 +686,39 @@ struct DecisionControls: View {
     }
 
     private func chips(_ side: CategoryKind) -> some View {
+        let all = context.categories(side)
+        let shown = CategorySearch.rank(all.map(\.name), for: query).map { all[$0] }
+        let typed = query.trimmingCharacters(in: .whitespaces)
+        let exact = shown.contains { $0.name.caseInsensitiveCompare(typed) == .orderedSame }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Find a category", text: $query)
+                    .focused($searching)
+                    .autocorrectionDisabled()
+                    .submitLabel(.done)
+                    // Return takes the best match, or makes the one typed.
+                    .onSubmit {
+                        if let first = shown.first { pick(first, searched: true) }
+                        else if !typed.isEmpty { create(typed) }
+                    }
+                if !query.isEmpty {
+                    Button("Clear", systemImage: "xmark.circle.fill") { query = "" }
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+            chipFlow(shown, typed: typed, exact: exact)
+        }
+    }
+
+    private func chipFlow(_ shown: [Category], typed: String, exact: Bool) -> some View {
         ChipFlow(spacing: 8) {
-            ForEach(context.categories(side)) { chip in
-                Chip(title: chip.name, selected: selected(chip)) { pick(chip) }
+            ForEach(shown) { chip in
+                Chip(title: chip.name, selected: selected(chip)) { pick(chip, searched: !typed.isEmpty) }
                     // A typo in + New is fixed where it was made.
                     .contextMenu {
                         Button("Rename", systemImage: "pencil") {
@@ -675,12 +731,22 @@ struct DecisionControls: View {
                         }
                     }
             }
-            Chip(title: "+ New", selected: false, dashed: true) {
-                Telemetry.shared.log("button", ["name": "new-category"])
-                newName = ""
-                adding = true
+            if typed.isEmpty {
+                Chip(title: "+ New", selected: false, dashed: true) {
+                    Telemetry.shared.log("button", ["name": "new-category"])
+                    newName = ""
+                    adding = true
+                }
+            } else if !exact {
+                Chip(title: "+ New \u{201C}\(typed)\u{201D}", selected: false, dashed: true) { create(typed) }
             }
         }
+    }
+
+    /// Makes the category typed in the search and picks it.
+    private func create(_ name: String) {
+        newName = name
+        addCategory()
     }
 
     // MARK: Splitting
@@ -889,7 +955,9 @@ struct DecisionControls: View {
         splitting ? (split.indices.contains(active) && split[active].category === chip) : chip === category
     }
 
-    private func pick(_ chip: Category) {
+    private func pick(_ chip: Category, searched: Bool = false) {
+        query = ""
+        searching = false
         if splitting {
             guard split.indices.contains(active) else { return }
             split[active].category = chip
@@ -898,7 +966,7 @@ struct DecisionControls: View {
         } else {
             category = chip
         }
-        Telemetry.shared.log("chip", ["name": chip.name, "split": "\(splitting)"])
+        Telemetry.shared.log("chip", ["name": chip.name, "split": "\(splitting)", "searched": "\(searched)"])
     }
 
     private func addCategory() {

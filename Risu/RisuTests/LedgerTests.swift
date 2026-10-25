@@ -335,6 +335,18 @@ struct SplitTests {
         #expect(drafts.resolved(total: 15000) == nil)  // the last part has no category yet
     }
 
+    @Test("Category search: start of the name, then start of a word, then anywhere; most used first within each")
+    func categorySearch() {
+        let names = ["Go Out to Eat", "Isthmus Eats", "Coffee", "Gas", "Household Items", "Café Lunch", "Groceries"]
+        #expect(CategorySearch.rank(names, for: "ea").map { names[$0] } == ["Go Out to Eat", "Isthmus Eats"])
+        #expect(CategorySearch.rank(names, for: "g").map { names[$0] } == ["Go Out to Eat", "Gas", "Groceries"])
+        #expect(CategorySearch.rank(names, for: "ITEM").map { names[$0] } == ["Household Items"])
+        #expect(CategorySearch.rank(names, for: "cafe").map { names[$0] } == ["Café Lunch"])
+        #expect(CategorySearch.rank(names, for: "ff").map { names[$0] } == ["Coffee"])
+        #expect(CategorySearch.rank(names, for: "  ").count == names.count)
+        #expect(CategorySearch.rank(names, for: "zzz").isEmpty)
+    }
+
     @Test("While typing, the last part takes what's left")
     func remainder() {
         var drafts = [SplitDraft(text: "100", category: groceries), SplitDraft(category: household)]
