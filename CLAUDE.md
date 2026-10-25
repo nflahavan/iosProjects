@@ -24,11 +24,11 @@ decisions still open, are on the diagram at
 
 ```bash
 cd Risu
-xcodebuild test -scheme Risu -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0'   # ~10s
+xcodebuild test -scheme Risu -destination 'platform=iOS Simulator,name=iPhone Duo,OS=27.1'   # ~10s
 Scripts/testflight      # archive and upload a TestFlight build, as the Apple ID signed in to Xcode
 ```
 
-Targets iOS 27.0, iPhone only, Swift 6 with the main actor as the default isolation.
+Targets iOS 27.1, iPhone only (the 27.1 simulator runtime runs only the iPhone Duo), Swift 6 with the main actor as the default isolation.
 Parallel testing is off in the scheme: it clones the simulator, which made a 0.1s suite
 take minutes.
 

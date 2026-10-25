@@ -8,6 +8,7 @@ struct ReviewScreen: View {
     @Binding var importFile: IncomingFile?
     let review: ReviewState
     @Environment(\.modelContext) private var context
+    @Environment(\.horizontalSizeClass) private var widthClass
     @Query(sort: \Source.name) private var sources: [Source]
     /// The account being reviewed, by name; empty is all of them.
     @AppStorage("reviewSource") private var sourceName = ""
@@ -60,11 +61,8 @@ struct ReviewScreen: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                if sources.count > 1 { accountPicker }
-                if !waiting.isEmpty { strip }
-                status
-                content
+            Group {
+                if widthClass == .regular { wide } else { narrow }
             }
             .navigationTitle(review.snapshot == nil || waiting.isEmpty ? "Review" : "Review · \(waiting.count) left")
             .navigationBarTitleDisplayMode(.inline)
@@ -92,6 +90,37 @@ struct ReviewScreen: View {
             .screen("review")
             // Coming back from another tab: something there may have changed.
             .onAppear { review.refresh(after: .elsewhere) }
+        }
+    }
+
+    /// An iPhone, or iPhone Duo closed: the rows as a strip above the card.
+    private var narrow: some View {
+        VStack(spacing: 0) {
+            if sources.count > 1 { accountPicker }
+            if !waiting.isEmpty { strip }
+            status
+            content
+        }
+    }
+
+    /// iPhone Duo open: the rows as a list beside the card, split at the
+    /// fold in landscape, above it in portrait, the way Mail shows its list
+    /// and a message together. The account chips go with the list they filter.
+    private var wide: some View {
+        VStack(spacing: 0) {
+            status
+            ArrangementView {
+                VStack(spacing: 0) {
+                    if sources.count > 1 { accountPicker }
+                    queueList
+                }
+                // Side by side, halves meet at the fold. Stacked, the card
+                // needs most of the height for its chips.
+                .splitArrangementLayoutRatio(idealHorizontal: 0.5, idealVertical: 0.35)
+            } secondary: {
+                content
+            }
+            .arrangementViewStyle(.split)
         }
     }
 
@@ -188,11 +217,7 @@ struct ReviewScreen: View {
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 8) {
                     ForEach(Array(waiting.enumerated()), id: \.element.id) { index, row in
-                        RowTile(id: row.id, selected: row.id == currentWaiting) {
-                            picked = row.id
-                            backSteps = 0
-                            Telemetry.shared.log("strip-pick", ["position": "\(index)"])
-                        }
+                        RowTile(id: row.id, selected: row.id == currentWaiting) { pick(row.id, at: index, from: "strip") }
                         .id(row.id)
                     }
                 }
@@ -209,6 +234,34 @@ struct ReviewScreen: View {
                 withAnimation { scroller.scrollTo(id, anchor: .leading) }
             }
         }
+    }
+
+    /// The same rows as the strip, as a list, when there's room for one.
+    private var queueList: some View {
+        ScrollViewReader { scroller in
+            List(Array(waiting.enumerated()), id: \.element.id) { index, row in
+                QueueRow(id: row.id, selected: row.id == currentWaiting) { pick(row.id, at: index, from: "list") }
+                    .id(row.id)
+            }
+            .listStyle(.plain)
+            .overlay {
+                if review.snapshot != nil, waiting.isEmpty {
+                    Text("No rows waiting").foregroundStyle(.secondary)
+                }
+            }
+            .onAppear { if let id = currentWaiting { scroller.scrollTo(id, anchor: .center) } }
+            .onChange(of: currentWaiting) { _, id in
+                guard let id else { return }
+                withAnimation { scroller.scrollTo(id, anchor: .center) }
+            }
+        }
+    }
+
+    /// A waiting row picked from the strip or list goes on the card.
+    private func pick(_ id: PersistentIdentifier, at index: Int, from place: String) {
+        picked = id
+        backSteps = 0
+        Telemetry.shared.log("strip-pick", ["position": "\(index)", "from": place])
     }
 
     @ViewBuilder
@@ -325,6 +378,22 @@ struct RowTile: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// A waiting row in the review's list, on the wider display.
+struct QueueRow: View {
+    let id: PersistentIdentifier
+    let selected: Bool
+    let pick: () -> Void
+    @Environment(\.modelContext) private var context
+
+    var body: some View {
+        Button(action: pick) {
+            if let entry = try? context.entry(id) { EntryRow(entry: entry) }
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(selected ? Color.accentColor.opacity(0.18) : Color.clear)
     }
 }
 
