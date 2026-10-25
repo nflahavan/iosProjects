@@ -16,6 +16,9 @@ struct ReviewScreen: View {
     /// How many decided rows back from the queue you've stepped. 0 is the
     /// next new row.
     @State private var backSteps = 0
+    /// A waiting row picked from the strip, ahead of the ones before it.
+    /// Nil is the first waiting row.
+    @State private var picked: PersistentIdentifier?
 
     /// The picked account, while it still exists.
     private var account: String { sources.contains { $0.name == sourceName } ? sourceName : "" }
@@ -34,6 +37,11 @@ struct ReviewScreen: View {
     private var current: Card {
         if backSteps > 0 {
             return backSteps <= decided.count ? lookup(decided[backSteps - 1].id) : .none
+        }
+        // A picked row decided since (here or elsewhere) falls back to the first.
+        if let picked, waiting.contains(where: { $0.id == picked }),
+           case .entry(let entry) = lookup(picked), entry.kindRaw == nil {
+            return .entry(entry)
         }
         for row in waiting {
             switch lookup(row.id) {
@@ -54,6 +62,7 @@ struct ReviewScreen: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if sources.count > 1 { accountPicker }
+                if !waiting.isEmpty { strip }
                 status
                 content
             }
@@ -160,7 +169,45 @@ struct ReviewScreen: View {
             guard account != name else { return }
             sourceName = name
             backSteps = 0
+            picked = nil
             Telemetry.shared.log("review-account", ["name": name.isEmpty ? "all" : name, "left": count.map(String.init) ?? "?"])
+        }
+    }
+
+    /// The row on the card, when it's a waiting one.
+    private var currentWaiting: PersistentIdentifier? {
+        guard backSteps == 0, case .entry(let entry) = current else { return nil }
+        return entry.persistentModelID
+    }
+
+    /// The rows waiting, side by side in review order, to scan ahead and
+    /// pick the ones you know. One you don't know yet stays where it is,
+    /// and the card moves on from whichever you picked.
+    private var strip: some View {
+        ScrollViewReader { scroller in
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 8) {
+                    ForEach(Array(waiting.enumerated()), id: \.element.id) { index, row in
+                        RowTile(id: row.id, selected: row.id == currentWaiting) {
+                            picked = row.id
+                            backSteps = 0
+                            Telemetry.shared.log("strip-pick", ["position": "\(index)"])
+                        }
+                        .id(row.id)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+            }
+            .scrollIndicators(.hidden)
+            .frame(height: 88)
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
+            .onAppear { if let id = currentWaiting { scroller.scrollTo(id, anchor: .leading) } }
+            .onChange(of: currentWaiting) { _, id in
+                guard let id else { return }
+                withAnimation { scroller.scrollTo(id, anchor: .leading) }
+            }
         }
     }
 
@@ -186,7 +233,11 @@ struct ReviewScreen: View {
                                backSteps -= 1
                                review.refresh(after: .decision)
                            } else {
-                               review.decided(entry.persistentModelID)
+                               // On to the row after this one, leaving any passed over behind.
+                               let id = entry.persistentModelID
+                               let index = waiting.firstIndex { $0.id == id }
+                               picked = index.flatMap { waiting.indices.contains($0 + 1) ? waiting[$0 + 1].id : nil }
+                               review.decided(id)
                            }
                        })
                 .id(entry.persistentModelID)
@@ -213,6 +264,44 @@ struct ReviewScreen: View {
     private func open() {
         Telemetry.shared.log("button", ["name": "import-csv"])
         picking = true
+    }
+}
+
+/// A waiting row in the review's strip: enough to know whether it's one
+/// you can answer now. Looked up only when scrolled into view.
+struct RowTile: View {
+    let id: PersistentIdentifier
+    let selected: Bool
+    let pick: () -> Void
+    @Environment(\.modelContext) private var context
+
+    var body: some View {
+        Button(action: pick) {
+            VStack(alignment: .leading, spacing: 3) {
+                if let entry = try? context.entry(id) {
+                    Text(entry.text.isEmpty ? "No description" : entry.text)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(2, reservesSpace: true)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(entry.day.shortTitle).foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        Text((entry.amountCents < 0 ? "−" : "+") + Money.text(entry.amountCents))
+                            .monospacedDigit()
+                            .foregroundStyle(entry.amountCents < 0 ? Color.primary : Color.green)
+                    }
+                    .font(.caption2)
+                    .lineLimit(1)
+                }
+            }
+            .padding(8)
+            .frame(width: 148, height: 68, alignment: .topLeading)
+            .background(selected ? Color.accentColor.opacity(0.18) : Color(.secondarySystemFill),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                if selected { RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor, lineWidth: 1.5) }
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 

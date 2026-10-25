@@ -52,6 +52,16 @@ nonisolated struct Day: Hashable, Comparable, Codable, Sendable {
         let date = Calendar(identifier: .gregorian).date(from: c) ?? .now
         return date.formatted(.dateTime.month(.abbreviated).day().year())
     }
+
+    /// "Oct 19", with the year only when it isn't this one: "Mar 3, 2014".
+    var shortTitle: String {
+        var c = DateComponents(); c.year = year; c.month = month; c.day = day
+        let calendar = Calendar(identifier: .gregorian)
+        let date = calendar.date(from: c) ?? .now
+        return year == calendar.component(.year, from: .now)
+            ? date.formatted(.dateTime.month(.abbreviated).day())
+            : date.formatted(.dateTime.month(.abbreviated).day().year())
+    }
 }
 
 /// The order a CSV writes day, month and year in.
