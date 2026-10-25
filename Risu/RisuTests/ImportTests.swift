@@ -170,4 +170,21 @@ struct MergeTests {
         #expect(first.count == 3)
         #expect(SourceMerge.newRows(items, existing: first.map(\.parsed.mergeKey)).isEmpty)
     }
+
+    @Test("A held row the file covers but doesn't list is gone; rows outside its days aren't judged")
+    func gone() {
+        let held = [row(1, "OLD", -100), row(3, "PENDING DINER", -2000), row(4, "GROCER", -500), row(9, "LATER", -1)]
+            .map { ($0.mergeKey, $0.day) }
+        let incoming = [row(2, "GAS", -3000), row(4, "GROCER", -500), row(5, "DINER", -2400)]
+        #expect(SourceMerge.goneRows(held, incoming: incoming) == [1])
+    }
+
+    @Test("Gone rows are counted: two coffees held and one listed, the later one is gone")
+    func goneCounted() {
+        let coffee = row(2, "COFFEE", -450)
+        let held = [coffee, coffee].map { ($0.mergeKey, $0.day) }
+        #expect(SourceMerge.goneRows(held, incoming: [coffee]) == [1])
+        #expect(SourceMerge.goneRows(held, incoming: [coffee, coffee]).isEmpty)
+        #expect(SourceMerge.goneRows(held, incoming: []).isEmpty)
+    }
 }

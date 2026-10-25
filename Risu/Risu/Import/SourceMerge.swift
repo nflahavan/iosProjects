@@ -23,4 +23,27 @@ nonisolated enum SourceMerge {
             return true
         }
     }
+
+    /// Which rows a source holds that a new file says the bank no longer
+    /// has: usually a pending charge that has since posted under another
+    /// amount, date or description, or one that was reversed.
+    ///
+    /// A file lists everything the bank had for the days it covers, so a
+    /// held row dated within them that the file doesn't list is gone. It's
+    /// counted the same way as `newRows`: two coffees held and one in the
+    /// file, one is gone (the later held one). Rows outside the file's days
+    /// aren't judged. Returns indices into `held`.
+    static func goneRows(_ held: [(key: String, day: Day)], incoming: [ParsedRow]) -> [Int] {
+        guard let first = incoming.map(\.day).min(), let last = incoming.map(\.day).max() else { return [] }
+        var listed = Dictionary(incoming.map { ($0.mergeKey, 1) }, uniquingKeysWith: +)
+        return held.indices.filter { index in
+            let row = held[index]
+            guard first <= row.day, row.day <= last else { return false }
+            if let count = listed[row.key], count > 0 {
+                listed[row.key] = count - 1
+                return false
+            }
+            return true
+        }
+    }
 }

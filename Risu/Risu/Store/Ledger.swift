@@ -38,8 +38,9 @@ extension ModelContext {
             case .failure: unreadable += 1
             }
         }
-        let held = source.files.flatMap(\.entries).map(\.mergeKey)
-        let fresh = SourceMerge.newRows(parsed, existing: held)
+        let held = source.files.sorted { $0.importedAt < $1.importedAt }.flatMap { $0.entries.sorted { $0.row < $1.row } }
+        let fresh = SourceMerge.newRows(parsed, existing: held.map(\.mergeKey))
+        let gone = SourceMerge.goneRows(held.map { ($0.mergeKey, $0.day) }, incoming: parsed.map(\.parsed)).map { held[$0] }
 
         let file = ImportedFile(name: name, contents: contents, source: source)
         insert(file)
@@ -47,13 +48,22 @@ extension ModelContext {
             insert(LedgerEntry(parsed: item.parsed, row: item.row, file: file))
         }
         try save()
-        return ImportSummary(new: fresh.count, alreadyHere: parsed.count - fresh.count, unreadable: unreadable)
+        return ImportSummary(new: fresh.count, alreadyHere: parsed.count - fresh.count, unreadable: unreadable,
+                             gone: gone.map(\.persistentModelID), goneReviewed: gone.filter(\.isReviewed).count)
+    }
+
+    /// Deletes rows the bank no longer has, with their split parts and
+    /// receipts. Ones already deleted are skipped. Returns how many went.
+    @discardableResult
+    func removeGone(_ ids: [PersistentIdentifier]) throws -> Int {
+        let entries = try ids.compactMap(entry)
+        entries.forEach(delete)
+        try save()
+        return entries.count
     }
 
     // MARK: Reviewing
 
-    /// Rows still to decide, oldest file first, in file order.
-    /// Rows waiting, a file at a time in import order; one account's, or all.
     /// One transaction by its identifier, from a `ReviewSnapshot`; nil if
     /// it's gone. Fetched rather than taken with `model(for:)`, which hands
     /// back a model for an identifier with nothing behind it.
@@ -185,6 +195,11 @@ nonisolated struct ImportSummary: Equatable, Sendable {
     var new: Int
     var alreadyHere: Int
     var unreadable: Int
+    /// Rows held from earlier files that this one shows the bank no longer
+    /// has. Not removed until you say so.
+    var gone: [PersistentIdentifier] = []
+    /// How many of those you'd already reviewed.
+    var goneReviewed = 0
 }
 
 nonisolated enum LedgerError: LocalizedError, Equatable {

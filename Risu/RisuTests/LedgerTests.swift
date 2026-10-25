@@ -35,6 +35,40 @@ struct LedgerTests {
         #expect(try context.reviewQueue().map(\.text) == ["GAS", "GROCER", "COFFEE"])
     }
 
+    @Test("A pending charge that posted differently is found gone, and removed only when asked")
+    func pendingPosted() async throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "early.csv", contents: csv("""
+        09/01/2026,RENT,-900.00
+        10/01/2026,GROCER,-20.00
+        10/02/2026,PENDING DINER,-40.00
+        """), into: card)
+        let pending = try #require(try context.reviewQueue().first { $0.text == "PENDING DINER" })
+        try context.decide(pending, kind: .expense, sign: 1, category: context.category(named: "Eating out", kind: .expense))
+
+        // The tip went on and it posted the next day. September isn't in this file, so rent isn't judged.
+        let later = try context.importFile(named: "later.csv", contents: csv("""
+        10/01/2026,GROCER,-20.00
+        10/03/2026,DINER,-48.00
+        """), into: card)
+        #expect(later.new == 1)
+        #expect(later.gone == [pending.persistentModelID])
+        #expect(later.goneReviewed == 1)
+        #expect(try context.fetch(FetchDescriptor<LedgerEntry>()).count == 4)
+
+        #expect(try context.removeGone(later.gone) == 1)
+        #expect(try context.fetch(FetchDescriptor<LedgerEntry>()).map(\.text).sorted() == ["DINER", "GROCER", "RENT"])
+        #expect(try context.removeGone(later.gone) == 0)
+        // Read again on its own context, the overview counts the dinner once: unreviewed, as posted.
+        let overview = try await LedgerReader(modelContainer: context.container).overview()
+        #expect(overview.totals["2026-10"]?.expenses == 0)
+        #expect(overview.totals["2026-10"]?.unreviewed == 2)
+
+        // The same file again finds nothing gone or new.
+        let again = try context.importFile(named: "later.csv", contents: csv("10/01/2026,GROCER,-20.00\n10/03/2026,DINER,-48.00"), into: card)
+        #expect(again == ImportSummary(new: 0, alreadyHere: 2, unreadable: 0))
+    }
+
     @Test("The review reads its rows off the main thread, by account too")
     func oneAccount() async throws {
         let header = ["Date", "Description", "Amount"]

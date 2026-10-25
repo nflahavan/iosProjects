@@ -10,6 +10,8 @@ struct ImportFlow: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Source.name) private var sources: [Source]
     @State private var summary: ImportSummary?
+    /// How many rows the bank no longer has were removed, once you said so.
+    @State private var removed: Int?
     @State private var problem: String?
     @State private var settingUp = false
 
@@ -105,23 +107,68 @@ struct ImportFlow: View {
     }
 
     private func result(_ s: ImportSummary) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "tray.and.arrow.down.fill").font(.system(size: 44)).foregroundStyle(.tint)
-            Text(s.new == 0 ? "Nothing new" : "\(s.new) new to review").font(.title2.weight(.semibold))
-            VStack(spacing: 4) {
-                if s.alreadyHere > 0 { Text("\(s.alreadyHere) already here, skipped") }
-                if s.unreadable > 0 { Text("\(s.unreadable) rows couldn't be read") }
+        List {
+            Section {
+                VStack(spacing: 12) {
+                    Image(systemName: "tray.and.arrow.down.fill").font(.system(size: 44)).foregroundStyle(.tint)
+                    Text(s.new == 0 ? "Nothing new" : "\(s.new) new to review").font(.title2.weight(.semibold))
+                    VStack(spacing: 4) {
+                        if s.alreadyHere > 0 { Text("\(s.alreadyHere) already here, skipped") }
+                        if s.unreadable > 0 { Text("\(s.unreadable) rows couldn't be read") }
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .listRowBackground(Color.clear)
             }
-            .foregroundStyle(.secondary)
+            if let removed {
+                Section {
+                    Label("Removed \(removed) row\(removed == 1 ? "" : "s") the bank no longer has", systemImage: "checkmark.circle")
+                }
+            } else if !s.gone.isEmpty {
+                gone(s)
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
             Button(s.new == 0 ? "Done" : "Start reviewing") {
+                if removed == nil, !s.gone.isEmpty { Telemetry.shared.log("gone-kept", ["rows": "\(s.gone.count)"]) }
                 Telemetry.shared.log("button", ["name": "import-done"])
                 finished()
                 dismiss()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .padding()
         }
-        .padding()
+    }
+
+    /// Rows from earlier files this one doesn't list, though it covers
+    /// their days. Shown so you can see them before they go.
+    private func gone(_ s: ImportSummary) -> some View {
+        let n = s.gone.count
+        return Section {
+            ForEach(s.gone, id: \.self) { id in
+                if let entry = try? context.entry(id) { EntryRow(entry: entry) }
+            }
+            Button("Remove \(n == 1 ? "it" : "them")", role: .destructive) { remove(s.gone) }
+        } header: {
+            Text("\(n) row\(n == 1 ? " is" : "s are") gone from the bank")
+        } footer: {
+            Text("This file covers \(n == 1 ? "its day" : "their days") but doesn't list \(n == 1 ? "it" : "them"). "
+                 + "Usually that's a pending charge that has since posted, which is above as a new row, or one that was reversed. "
+                 + (s.goneReviewed == 0 ? "" : "You'd reviewed \(s.goneReviewed) of them; the posted row needs reviewing again. ")
+                 + "If this file is older than your last import, keep them.")
+        }
+    }
+
+    private func remove(_ ids: [PersistentIdentifier]) {
+        do {
+            removed = try context.removeGone(ids)
+            Telemetry.shared.log("gone-removed", ["rows": "\(removed!)"])
+        } catch {
+            problem = error.localizedDescription
+            Telemetry.shared.log("gone-remove-failed", ["why": error.localizedDescription])
+        }
     }
 
     private func run(into source: Source) {
@@ -129,7 +176,8 @@ struct ImportFlow: View {
         do {
             summary = try context.importFile(named: file.name, contents: data, into: source)
             Telemetry.shared.log("imported", ["source": source.name, "new": "\(summary!.new)",
-                                              "already": "\(summary!.alreadyHere)", "unreadable": "\(summary!.unreadable)"])
+                                              "already": "\(summary!.alreadyHere)", "unreadable": "\(summary!.unreadable)",
+                                              "gone": "\(summary!.gone.count)", "goneReviewed": "\(summary!.goneReviewed)"])
         } catch {
             problem = error.localizedDescription
             Telemetry.shared.log("import-failed", ["why": error.localizedDescription])
