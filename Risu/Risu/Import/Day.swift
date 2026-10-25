@@ -53,6 +53,24 @@ nonisolated struct Day: Hashable, Comparable, Codable, Sendable {
         return date.formatted(.dateTime.month(.abbreviated).day().year())
     }
 
+    /// Midnight UTC that day, for charts' time axes.
+    var date: Date {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        var c = DateComponents(); c.year = year; c.month = month; c.day = day
+        return calendar.date(from: c) ?? .distantPast
+    }
+
+    /// The day `days` later (or earlier, when negative).
+    func adding(days: Int) -> Day {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        var c = DateComponents(); c.year = year; c.month = month; c.day = day
+        guard let date = calendar.date(from: c), let moved = calendar.date(byAdding: .day, value: days, to: date) else { return self }
+        let m = calendar.dateComponents([.year, .month, .day], from: moved)
+        return Day(year: m.year ?? year, month: m.month ?? month, day: m.day ?? day)
+    }
+
     /// "Oct 19", with the year only when it isn't this one: "Mar 3, 2014".
     var shortTitle: String {
         var c = DateComponents(); c.year = year; c.month = month; c.day = day

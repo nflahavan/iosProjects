@@ -355,6 +355,35 @@ struct SplitTests {
         #expect(overview.trend(endingAt: .year(2026)) == [.year(2025), .year(2026)])
     }
 
+    @Test("A Sankey balances: saved or from savings makes both sides the middle; small categories fold")
+    func sankey() {
+        var t = MonthTotals()
+        t.incomeLines = [.init(name: "Pay", cents: 1000)]
+        t.expenseLines = (1...10).map { .init(name: "C\($0)", cents: 100 - $0) } + [.init(name: "Refunded", cents: -20)]
+        let s = Sankey(totals: t, maxLeft: 4, maxRight: 7)
+        #expect(s.right.map(\.name) == ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "Everything else", "Saved"])
+        #expect(s.right.first { $0.name == "Everything else" }?.cents == 92 + 91 + 90)
+        #expect(s.middle == 1000 && s.right.reduce(0) { $0 + $1.cents } == 1000)
+        t.incomeLines = [.init(name: "Pay", cents: 500)]
+        let over = Sankey(totals: t)
+        #expect(over.left.map(\.name) == ["Pay", "From savings"])
+        #expect(over.left.reduce(0) { $0 + $1.cents } == over.middle && over.middle == 945)
+        // Eight lines where seven fit: no fold just to hide one.
+        t.expenseLines = Array(t.expenseLines.prefix(8))
+        #expect(!Sankey(totals: t).right.contains { $0.role == .rest })
+    }
+
+    @Test("Net over a rolling window, day by day, across a month end")
+    func rolling() {
+        let overview = Overview(dailyNet: ["2026-09-29": 100, "2026-09-30": -40, "2026-10-01": 10, "2026-10-03": 5])
+        let points = overview.rollingNet(window: 2, from: Day(year: 2026, month: 9, day: 30), to: Day(year: 2026, month: 10, day: 3))
+        #expect(points.map(\.day.key) == ["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03"])
+        #expect(points.map(\.cents) == [60, -30, 10, 5])
+        let sparse = overview.rollingNet(window: 3, from: Day(year: 2026, month: 9, day: 30), to: Day(year: 2026, month: 10, day: 3), step: 2)
+        #expect(sparse.map(\.day.key) == ["2026-09-30", "2026-10-02", "2026-10-03"])
+        #expect(Day(year: 2026, month: 3, day: 1).adding(days: -1).key == "2026-02-28")
+    }
+
     @Test("Category search: start of the name, then start of a word, then anywhere; most used first within each")
     func categorySearch() {
         let names = ["Go Out to Eat", "Isthmus Eats", "Coffee", "Gas", "Household Items", "Café Lunch", "Groceries"]

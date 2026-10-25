@@ -303,6 +303,14 @@ nonisolated enum Period: Hashable, Sendable {
     var previous: Period { step(-1) }
     var next: Period { step(1) }
 
+    /// The first day of it.
+    var firstDay: Day {
+        switch self {
+        case .year(let y): Day(year: y, month: 1, day: 1)
+        case .month(let key): Day(key: key + "-01") ?? Day(year: 1970, month: 1, day: 1)
+        }
+    }
+
     func step(_ by: Int) -> Period {
         switch self {
         case .year(let year): return .year(year + by)
@@ -320,6 +328,29 @@ nonisolated struct Overview: Equatable, Sendable {
     /// Newest first.
     var months: [String] = []
     var totals: [String: MonthTotals] = [:]
+    /// Each day's reviewed income less its spending, by day key. Days
+    /// with neither aren't here.
+    var dailyNet: [String: Int] = [:]
+
+    /// Net over the `window` days ending on each day from `first` to
+    /// `last`, every `step` days: "over the past 30 days, +$1,240".
+    func rollingNet(window: Int, from first: Day, to last: Day, step: Int = 1) -> [(day: Day, cents: Int)] {
+        guard window > 0, first <= last else { return [] }
+        var sum = 0
+        var day = first.adding(days: -(window - 1))
+        // The window's opening days, before the first point.
+        while day < first { sum += dailyNet[day.key] ?? 0; day = day.adding(days: 1) }
+        var points: [(day: Day, cents: Int)] = []
+        var count = 0
+        while day <= last {
+            sum += dailyNet[day.key] ?? 0
+            if count % step == 0 || day == last { points.append((day, sum)) }
+            sum -= dailyNet[day.adding(days: -(window - 1)).key] ?? 0
+            day = day.adding(days: 1)
+            count += 1
+        }
+        return points
+    }
 
     /// Years with transactions, newest first.
     var years: [Int] { Array(Set(months.compactMap { Int($0.prefix(4)) })).sorted(by: >) }
@@ -378,8 +409,17 @@ actor LedgerReader {
     func overview() throws -> Overview {
         let entries = try modelContext.fetch(FetchDescriptor<LedgerEntry>())
         let byMonth = Dictionary(grouping: entries.flatMap(\.totalsItems), by: \.monthKey)
+        var daily: [String: Int] = [:]
+        for entry in entries {
+            switch entry.kind {
+            case .income?: daily[entry.dayKey, default: 0] += entry.contribution
+            case .expense?: daily[entry.dayKey, default: 0] -= entry.contribution
+            case .transfer?, nil: break
+            }
+        }
         return Overview(months: byMonth.keys.sorted(by: >),
-                        totals: byMonth.mapValues { MonthTotals(month: $0[0].monthKey, items: $0) })
+                        totals: byMonth.mapValues { MonthTotals(month: $0[0].monthKey, items: $0) },
+                        dailyNet: daily)
     }
 }
 
