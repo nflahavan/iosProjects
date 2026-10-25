@@ -346,6 +346,8 @@ struct ReviewCard: View {
     @State private var receipt: ReceiptFile?
     @State private var problem: String?
     @State private var shown = Date.now
+    /// While a category is being typed for, the save bar steps aside so the matches have room.
+    @State private var searching = false
 
     init(entry: LedgerEntry, remaining: Int, revisiting: Bool = false, canGoBack: Bool = false,
          back: @escaping () -> Void = {}, returnToNew: @escaping () -> Void = {},
@@ -371,11 +373,12 @@ struct ReviewCard: View {
                     if revisiting { revisitBanner }
                     summary
                     DecisionControls(kind: $kind, sign: $sign, category: $category, split: $split,
-                                     receipt: $receipt, total: abs(entry.amountCents))
+                                     receipt: $receipt, total: abs(entry.amountCents),
+                                     searchChanged: { searching = $0 })
                 }
                 .padding(20)
             }
-            nextButton
+            if !searching { nextButton }
         }
         .alert("Can't save that", isPresented: .constant(problem != nil)) {
             Button("OK") { problem = nil }
@@ -563,6 +566,8 @@ struct DecisionControls: View {
     @Binding var receipt: ReceiptFile?
     /// The bank amount, positive, which a split's pieces must add up to.
     let total: Int
+    /// Told when the category search gains or loses the keyboard.
+    var searchChanged: (Bool) -> Void = { _ in }
     @Environment(\.modelContext) private var context
     @State private var active = 0
     @State private var adding = false
@@ -633,6 +638,16 @@ struct DecisionControls: View {
                 // The chips sit under the active part; keep it in view.
                 guard split.indices.contains(new) else { return }
                 withAnimation { scroller.scrollTo(split[new].id, anchor: .top) }
+            }
+            .onChange(of: searching) { _, now in
+                searchChanged(now)
+                guard now else { return }
+                // Lift the field to the top so the matches show between it and the keyboard.
+                // The wait lets the keyboard finish shrinking the scroll view first.
+                Task {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    withAnimation { scroller.scrollTo(Self.searchField, anchor: .top) }
+                }
             }
         }
         .alert("New \(kind.categoryKind?.title.lowercased() ?? "") category", isPresented: $adding) {
@@ -711,9 +726,14 @@ struct DecisionControls: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+            .id(Self.searchField)
             chipFlow(shown, typed: typed, exact: exact)
+            // Room below a short list of matches, so the field can still reach the top.
+            if searching { Color.clear.frame(height: 400) }
         }
     }
+
+    private static let searchField = "category-search"
 
     private func chipFlow(_ shown: [Category], typed: String, exact: Bool) -> some View {
         ChipFlow(spacing: 8) {
