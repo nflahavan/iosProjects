@@ -367,8 +367,11 @@ struct SplitDraft: Identifiable, Equatable {
     }
 
     init(cents: Int, category: Category? = nil, label: String = "") {
-        self.init(text: String(format: "%d.%02d", cents / 100, cents % 100), category: category, label: label)
+        self.init(text: Self.text(cents), category: category, label: label)
     }
+
+    /// Cents as the amount field shows them: `12.50`.
+    static func text(_ cents: Int) -> String { String(format: "%d.%02d", cents / 100, cents % 100) }
 
     static func == (a: SplitDraft, b: SplitDraft) -> Bool {
         a.id == b.id && a.text == b.text && a.category === b.category && a.label == b.label
@@ -393,6 +396,21 @@ extension Array where Element == SplitDraft {
             out.append((cents, category, draft.label))
         }
         return out
+    }
+
+    /// Moves the line between part `index` and the next to `percent` of
+    /// the total, trading cents between those two parts only, so every other
+    /// part keeps its amount. Each of the two keeps at least a cent.
+    mutating func moveBoundary(after index: Int, toPercent percent: Int, total: Int) {
+        guard index >= 0, index + 1 < count else { return }
+        let amounts = cents(total: total)
+        let before = amounts[..<index].reduce(0, +)
+        let through = before + amounts[index] + amounts[index + 1]
+        guard through - before >= 2 else { return }
+        let boundary = Swift.min(Swift.max(total * percent / 100, before + 1), through - 1)
+        self[index].text = SplitDraft.text(boundary - before)
+        // The last part isn't typed: it takes what's left.
+        if index + 1 < count - 1 { self[index + 1].text = SplitDraft.text(through - boundary) }
     }
 
     static func from(_ entry: LedgerEntry) -> [SplitDraft] {
@@ -593,6 +611,11 @@ struct DecisionControls: View {
                 .font(.subheadline)
             }
             receiptBar
+            SplitBar(amounts: amounts, total: total, active: active) { index, percent in
+                split.moveBoundary(after: index, toPercent: percent, total: total)
+            } moved: {
+                Telemetry.shared.log("split-share-moved", ["parts": "\(split.count)"])
+            }
             ForEach(Array(split.enumerated()), id: \.element.id) { index, draft in
                 VStack(alignment: .leading, spacing: 10) {
                     partRow(index, draft, left: left)
@@ -660,7 +683,7 @@ struct DecisionControls: View {
         HStack(spacing: 10) {
             Button { active = index } label: {
                 HStack {
-                    Text("\(index + 1)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                    Circle().fill(SplitBar.color(index)).frame(width: 10, height: 10)
                     VStack(alignment: .leading, spacing: 1) {
                         if !draft.label.isEmpty {
                             Text(draft.label).font(.subheadline.weight(.semibold)).lineLimit(1)
@@ -682,6 +705,11 @@ struct DecisionControls: View {
             }
             .buttonStyle(.plain)
 
+            Text(percent(of: index == split.count - 1 ? left : split.cents(total: total)[index]))
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .trailing)
             if index == split.count - 1 {
                 Text(Money.text(left))
                     .monospacedDigit()
@@ -706,10 +734,16 @@ struct DecisionControls: View {
         }
     }
 
+    /// A part's share of the charge, to the whole percent, for showing.
+    private func percent(of cents: Int) -> String {
+        total > 0 ? "\(Int((Double(cents) * 100 / Double(total)).rounded()))%" : ""
+    }
+
+    /// Half and half to start, so the bar has two parts to drag between.
+    /// The keyboard stays down; tapping an amount types one instead.
     private func startSplit() {
-        split = [SplitDraft(category: category), SplitDraft()]
+        split = [SplitDraft(cents: total / 2, category: category), SplitDraft()]
         active = category == nil ? 0 : 1
-        focused = split[0].id
         Telemetry.shared.log("split-started")
     }
 
@@ -746,10 +780,11 @@ struct DecisionControls: View {
     }
 
     private func addPart() {
-        // The new part goes before the last, which keeps taking the rest.
-        split.insert(SplitDraft(), at: split.count - 1)
+        // The new part goes before the last, which keeps taking the rest,
+        // and starts with half of it.
+        let left = split.cents(total: total).last ?? 0
+        split.insert(SplitDraft(cents: Swift.max(left / 2, 0)), at: split.count - 1)
         active = split.count - 2
-        focused = split[active].id
         Telemetry.shared.log("split-part-added", ["parts": "\(split.count)"])
     }
 
@@ -793,6 +828,68 @@ struct DecisionControls: View {
         for i in split.indices where split[i].category === chip { split[i].category = nil }
         do { try context.remove(chip); Telemetry.shared.log("chip-menu", ["action": "delete"]) }
         catch { problem = error.localizedDescription }
+    }
+}
+
+/// A split as one bar, a segment per part sized by its share of the charge.
+/// Dragging the line between two parts moves money between them, a percent
+/// at a time; the amounts underneath follow.
+struct SplitBar: View {
+    let amounts: [Int]
+    let total: Int
+    let active: Int
+    /// The line after a part was dragged to a percent of the total.
+    let move: (_ after: Int, _ percent: Int) -> Void
+    let moved: () -> Void
+
+    static func color(_ index: Int) -> Color {
+        [Color.blue, .orange, .green, .purple, .pink, .teal, .yellow, .indigo, .brown, .mint][index % 10]
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width, height = geo.size.height
+            // Parts that add up to more than the charge (while typing) are
+            // drawn against what they add up to, so the bar never overflows.
+            let whole = Double(Swift.max(total, amounts.map { Swift.max($0, 0) }.reduce(0, +), 1))
+            let shares = amounts.map { Double(Swift.max($0, 0)) / whole }
+            let ends = shares.indices.map { shares[...$0].reduce(0, +) }
+            ZStack {
+                ForEach(shares.indices, id: \.self) { i in
+                    let start = i == 0 ? 0 : ends[i - 1]
+                    let segment = Swift.max(width * shares[i] - 3, 0)
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Self.color(i).opacity(i == active ? 1 : 0.7))
+                        .overlay {
+                            if segment > 40 {
+                                Text("\(Int((shares[i] * 100).rounded()))%")
+                                    .font(.caption.weight(.semibold)).monospacedDigit().foregroundStyle(.white)
+                            }
+                        }
+                        .frame(width: segment, height: height)
+                        .position(x: width * (start + shares[i] / 2), y: height / 2)
+                }
+                ForEach(0..<Swift.max(amounts.count - 1, 0), id: \.self) { k in
+                    Capsule()
+                        .fill(.background)
+                        .shadow(radius: 1.5)
+                        .frame(width: 6, height: height + 12)
+                        .frame(width: 44, height: height + 12)
+                        .contentShape(Rectangle())
+                        .position(x: width * ends[k], y: height / 2)
+                        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("split-bar"))
+                            .onChanged { drag in
+                                move(k, Int((drag.location.x / Swift.max(width, 1) * 100).rounded()))
+                            }
+                            .onEnded { _ in moved() })
+                        .accessibilityLabel("Line between part \(k + 1) and part \(k + 2)")
+                }
+            }
+            .coordinateSpace(.named("split-bar"))
+        }
+        .frame(height: 40)
+        .padding(.vertical, 6)
+        .sensoryFeedback(.selection, trigger: amounts.map { total > 0 ? $0 * 100 / total : 0 })
     }
 }
 

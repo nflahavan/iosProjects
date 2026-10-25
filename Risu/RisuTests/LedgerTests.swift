@@ -320,6 +320,21 @@ struct SplitTests {
         #expect(again.new == 0)
     }
 
+    @Test("Dragging the line between two parts moves money between those two only, a percent at a time")
+    func shares() {
+        var drafts = [SplitDraft(cents: 7500, category: groceries), SplitDraft(cents: 2500, category: household), SplitDraft()]
+        // 150.00 split 75 / 25 / 50. Move the first line to 40%: the second part pays for it.
+        drafts.moveBoundary(after: 0, toPercent: 40, total: 15000)
+        #expect(drafts.cents(total: 15000) == [6000, 4000, 5000])
+        // The last line trades with the last part, which takes what's left.
+        drafts.moveBoundary(after: 1, toPercent: 90, total: 15000)
+        #expect(drafts.cents(total: 15000) == [6000, 7500, 1500])
+        // Dragged past a neighbour, each part keeps a cent.
+        drafts.moveBoundary(after: 1, toPercent: 0, total: 15000)
+        #expect(drafts.cents(total: 15000) == [6000, 1, 8999])
+        #expect(drafts.resolved(total: 15000) == nil)  // the last part has no category yet
+    }
+
     @Test("While typing, the last part takes what's left")
     func remainder() {
         var drafts = [SplitDraft(text: "100", category: groceries), SplitDraft(category: household)]
