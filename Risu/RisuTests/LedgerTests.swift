@@ -335,6 +335,26 @@ struct SplitTests {
         #expect(drafts.resolved(total: 15000) == nil)  // the last part has no category yet
     }
 
+    @Test("A year adds up its months; periods step across year ends; a trend keeps empty months")
+    func periods() {
+        var a = MonthTotals(); a.income = 100; a.expenses = 40; a.incomeLines = [.init(name: "Pay", cents: 100)]
+        a.expenseLines = [.init(name: "Food", cents: 30), .init(name: "Gas", cents: 10)]
+        var b = MonthTotals(); b.expenses = 25; b.expenseLines = [.init(name: "Gas", cents: 25)]; b.unreviewed = 2
+        let overview = Overview(months: ["2026-02", "2025-12"], totals: ["2026-02": a, "2025-12": b])
+        let year = overview.totals(for: .year(2026))
+        #expect(year.income == 100 && year.expenses == 40)
+        #expect(overview.totals(for: .year(2025)).expenseLines.map(\.name) == ["Gas"])
+        #expect(MonthTotals(adding: [a, b]).expenseLines.map(\.cents) == [35, 30])
+        #expect(MonthTotals(adding: [a, b]).unreviewed == 2)
+        #expect(Period.month("2026-01").previous == .month("2025-12"))
+        #expect(Period.month("2025-12").next == .month("2026-01"))
+        #expect(overview.years == [2026, 2025])
+        let trend = overview.trend(endingAt: .month("2026-02"))
+        #expect(trend.count == 12 && trend.first == .month("2025-03") && trend.last == .month("2026-02"))
+        #expect(overview.totals(for: .month("2026-01")) == MonthTotals())
+        #expect(overview.trend(endingAt: .year(2026)) == [.year(2025), .year(2026)])
+    }
+
     @Test("Category search: start of the name, then start of a word, then anywhere; most used first within each")
     func categorySearch() {
         let names = ["Go Out to Eat", "Isthmus Eats", "Coffee", "Gas", "Household Items", "Café Lunch", "Groceries"]

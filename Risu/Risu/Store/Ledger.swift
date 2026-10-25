@@ -264,14 +264,54 @@ nonisolated struct MonthTotals: Equatable, Sendable {
             case .expense: expense[item.category ?? "Other", default: 0] += item.contribution
             }
         }
-        func lines(_ d: [String: Int]) -> [Line] {
-            d.map { Line(name: $0.key, cents: $0.value) }
-                .sorted { $0.cents != $1.cents ? $0.cents > $1.cents : $0.name < $1.name }
+        self.income = income.values.reduce(0, +)
+        self.expenses = expense.values.reduce(0, +)
+        self.incomeLines = Self.lines(income)
+        self.expenseLines = Self.lines(expense)
+    }
+
+    /// Several months as one: a year, or any stretch of them.
+    init(adding parts: [MonthTotals]) {
+        var income: [String: Int] = [:], expense: [String: Int] = [:]
+        for part in parts {
+            for line in part.incomeLines { income[line.name, default: 0] += line.cents }
+            for line in part.expenseLines { expense[line.name, default: 0] += line.cents }
+            unreviewed += part.unreviewed
         }
         self.income = income.values.reduce(0, +)
         self.expenses = expense.values.reduce(0, +)
-        self.incomeLines = lines(income)
-        self.expenseLines = lines(expense)
+        self.incomeLines = Self.lines(income)
+        self.expenseLines = Self.lines(expense)
+    }
+
+    /// Largest first; equal amounts by name.
+    private static func lines(_ d: [String: Int]) -> [Line] {
+        d.map { Line(name: $0.key, cents: $0.value) }
+            .sorted { $0.cents != $1.cents ? $0.cents > $1.cents : $0.name < $1.name }
+    }
+}
+
+/// A stretch of time the overview adds up.
+nonisolated enum Period: Hashable, Sendable {
+    /// `2026-10`.
+    case month(String)
+    case year(Int)
+
+    var isYear: Bool { if case .year = self { true } else { false } }
+
+    /// The one before: September for October, 2025 for 2026.
+    var previous: Period { step(-1) }
+    var next: Period { step(1) }
+
+    func step(_ by: Int) -> Period {
+        switch self {
+        case .year(let year): return .year(year + by)
+        case .month(let key):
+            let parts = key.split(separator: "-").compactMap { Int($0) }
+            guard parts.count == 2 else { return self }
+            let index = parts[0] * 12 + (parts[1] - 1) + by
+            return .month(String(format: "%04d-%02d", index / 12, index % 12 + 1))
+        }
     }
 }
 
@@ -280,6 +320,39 @@ nonisolated struct Overview: Equatable, Sendable {
     /// Newest first.
     var months: [String] = []
     var totals: [String: MonthTotals] = [:]
+
+    /// Years with transactions, newest first.
+    var years: [Int] { Array(Set(months.compactMap { Int($0.prefix(4)) })).sorted(by: >) }
+
+    /// A month's totals, or a year's months added together. Empty when
+    /// nothing happened in it.
+    func totals(for period: Period) -> MonthTotals {
+        switch period {
+        case .month(let key): return totals[key] ?? MonthTotals()
+        case .year(let year):
+            return MonthTotals(adding: months.filter { $0.hasPrefix(String(format: "%04d-", year)) }.compactMap { totals[$0] })
+        }
+    }
+
+    /// Whether anything happened in it.
+    func has(_ period: Period) -> Bool {
+        switch period {
+        case .month(let key): totals[key] != nil
+        case .year(let year): years.contains(year)
+        }
+    }
+
+    /// The periods a trend shows, oldest first, ending at `period`: the
+    /// twelve months to it, or every year to it. Gaps are kept, as zero,
+    /// so the time axis stays even.
+    func trend(endingAt period: Period) -> [Period] {
+        switch period {
+        case .month: return (0..<12).reversed().map { period.step(-$0) }
+        case .year(let last):
+            guard let first = years.last, first <= last else { return [period] }
+            return (first...last).map(Period.year)
+        }
+    }
 }
 
 /// Reads the ledger off the main thread, with its own context on the same
