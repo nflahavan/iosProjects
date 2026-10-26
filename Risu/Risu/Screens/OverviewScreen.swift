@@ -401,6 +401,7 @@ struct TransferList: View {
                     ForEach(lines) { line in
                         GridRow {
                             Text(line.name).lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 .foregroundStyle(line.name == MonthTotals.unlabelled ? Color.secondary : Color.primary)
                             Text(line.out == 0 ? "–" : Money.text(line.out))
                             Text(line.into == 0 ? "–" : Money.text(line.into))
