@@ -97,14 +97,15 @@ extension ModelContext {
     /// Records a decision. Changing one later keeps when it was first
     /// decided, so going back through the review keeps its order.
     func decide(_ entry: LedgerEntry, kind: Kind, sign: Int, category: Category?) throws {
-        // A transfer has no category, so whatever chip was picked is dropped.
-        if kind != .transfer {
-            guard let category else { throw LedgerError.needsCategory }
+        // A transfer's label is optional; income and spending need a category.
+        if let category {
             guard category.kind == kind.categoryKind else { throw LedgerError.wrongCategoryKind }
+        } else if kind != .transfer {
+            throw LedgerError.needsCategory
         }
         entry.kind = kind
         entry.sign = sign >= 0 ? 1 : -1
-        entry.category = kind == .transfer ? nil : category
+        entry.category = category
         clearParts(of: entry)
         if entry.reviewedAt == nil { entry.reviewedAt = .now }
         try save()
@@ -243,11 +244,27 @@ nonisolated struct MonthTotals: Equatable, Sendable {
     var net: Int { income - expenses }
     var incomeLines: [Line] = []
     var expenseLines: [Line] = []
+    /// Money moved between your own accounts, by label. Counts in neither
+    /// income nor spending.
+    var transferLines: [TransferLine] = []
     var unreviewed = 0
+
+    /// What left your accounts and what arrived, under one label. Kept
+    /// apart rather than netted: with both accounts imported, one move is
+    /// a row out of one and a row into the other, and netting would hide it.
+    struct TransferLine: Equatable, Identifiable, Sendable {
+        var name: String
+        var out = 0
+        var into = 0
+        var id: String { name }
+    }
+
+    static let unlabelled = "Unlabelled"
 
     struct Item: Sendable {
         var monthKey: String
         var kind: Kind?
+        /// For a transfer, the bank amount: negative left the account.
         var contribution: Int
         var category: String?
     }
@@ -256,10 +273,14 @@ nonisolated struct MonthTotals: Equatable, Sendable {
 
     init(month: String, items: [Item]) {
         var income: [String: Int] = [:], expense: [String: Int] = [:]
+        var moved: [String: TransferLine] = [:]
         for item in items where item.monthKey == month {
             switch item.kind {
             case nil: unreviewed += 1
-            case .transfer: break
+            case .transfer:
+                let name = item.category ?? Self.unlabelled
+                if item.contribution < 0 { moved[name, default: TransferLine(name: name)].out -= item.contribution }
+                else { moved[name, default: TransferLine(name: name)].into += item.contribution }
             case .income: income[item.category ?? "Other", default: 0] += item.contribution
             case .expense: expense[item.category ?? "Other", default: 0] += item.contribution
             }
@@ -268,26 +289,42 @@ nonisolated struct MonthTotals: Equatable, Sendable {
         self.expenses = expense.values.reduce(0, +)
         self.incomeLines = Self.lines(income)
         self.expenseLines = Self.lines(expense)
+        self.transferLines = Self.lines(moved)
     }
 
     /// Several months as one: a year, or any stretch of them.
     init(adding parts: [MonthTotals]) {
         var income: [String: Int] = [:], expense: [String: Int] = [:]
+        var moved: [String: TransferLine] = [:]
         for part in parts {
             for line in part.incomeLines { income[line.name, default: 0] += line.cents }
             for line in part.expenseLines { expense[line.name, default: 0] += line.cents }
+            for line in part.transferLines {
+                moved[line.name, default: TransferLine(name: line.name)].out += line.out
+                moved[line.name, default: TransferLine(name: line.name)].into += line.into
+            }
             unreviewed += part.unreviewed
         }
         self.income = income.values.reduce(0, +)
         self.expenses = expense.values.reduce(0, +)
         self.incomeLines = Self.lines(income)
         self.expenseLines = Self.lines(expense)
+        self.transferLines = Self.lines(moved)
     }
 
     /// Largest first; equal amounts by name.
     private static func lines(_ d: [String: Int]) -> [Line] {
         d.map { Line(name: $0.key, cents: $0.value) }
             .sorted { $0.cents != $1.cents ? $0.cents > $1.cents : $0.name < $1.name }
+    }
+
+    /// Most moved first, with what's unlabelled last.
+    private static func lines(_ d: [String: TransferLine]) -> [TransferLine] {
+        d.values.sorted {
+            if ($0.name == unlabelled) != ($1.name == unlabelled) { return $1.name == unlabelled }
+            let a = $0.out + $0.into, b = $1.out + $1.into
+            return a != b ? a > b : $0.name < $1.name
+        }
     }
 }
 
@@ -427,6 +464,8 @@ extension LedgerEntry {
     /// What it adds to its month: one item, or one per split part.
     var totalsItems: [MonthTotals.Item] {
         let month = day.monthKey, kind = kind
+        // A transfer goes by which way the money went, not by a sign.
+        if kind == .transfer { return [MonthTotals.Item(monthKey: month, kind: kind, contribution: amountCents, category: category?.name)] }
         return shares.map { MonthTotals.Item(monthKey: month, kind: kind, contribution: $0.contribution, category: $0.category?.name) }
     }
 }

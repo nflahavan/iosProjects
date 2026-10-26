@@ -7,9 +7,23 @@ struct TransactionsScreen: View {
     @Query(sort: [SortDescriptor(\LedgerEntry.dayKey, order: .reverse), SortDescriptor(\LedgerEntry.row)])
     private var entries: [LedgerEntry]
     @State private var editing: LedgerEntry?
+    @State private var filter = Filter.all
+
+    enum Filter: String, CaseIterable, Identifiable {
+        case all, unlabelledTransfers
+        var id: String { rawValue }
+        var title: String { self == .all ? "All transactions" : "Transfers without a label" }
+    }
+
+    private var shown: [LedgerEntry] {
+        switch filter {
+        case .all: entries
+        case .unlabelledTransfers: entries.filter { $0.kind == .transfer && $0.category == nil }
+        }
+    }
 
     private var months: [(key: String, entries: [LedgerEntry])] {
-        Dictionary(grouping: entries, by: { $0.day.monthKey })
+        Dictionary(grouping: shown, by: { $0.day.monthKey })
             .sorted { $0.key > $1.key }
             .map { ($0.key, $0.value) }
     }
@@ -32,9 +46,21 @@ struct TransactionsScreen: View {
                 if entries.isEmpty {
                     ContentUnavailableView("No transactions", systemImage: "list.bullet",
                                            description: Text("Import a CSV from the Review tab."))
+                } else if shown.isEmpty {
+                    ContentUnavailableView("Every transfer has a label", systemImage: "checkmark.circle",
+                                           description: Text("Transfers you mark without one will be listed here."))
                 }
             }
-            .navigationTitle("Transactions")
+            .navigationTitle(filter == .all ? "Transactions" : "Unlabelled transfers")
+            .navigationBarTitleDisplayMode(filter == .all ? .automatic : .inline)
+            .toolbar {
+                Menu("Show", systemImage: filter == .all ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill") {
+                    Picker("Show", selection: $filter) {
+                        ForEach(Filter.allCases) { Text($0.title).tag($0) }
+                    }
+                }
+            }
+            .onChange(of: filter) { _, new in Telemetry.shared.log("transactions-filter", ["to": new.rawValue]) }
             .sheet(item: $editing) { EditEntrySheet(entry: $0) }
             .screen("transactions")
         }
@@ -60,7 +86,7 @@ struct EntryRow: View {
     private var caption: String {
         let day = entry.day.title
         guard let kind = entry.kind else { return "\(day) · To review" }
-        if kind == .transfer { return "\(day) · Transfer" }
+        if kind == .transfer { return "\(day) · Transfer" + (entry.category.map { ": \($0.name)" } ?? "") }
         let refund = entry.sign < 0 ? " (refund)" : ""
         if entry.isSplit {
             // A receipt's eight items might be three categories; name each once.

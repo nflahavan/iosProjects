@@ -140,10 +140,14 @@ struct LedgerTests {
 
         #expect(throws: LedgerError.needsCategory) { try context.decide(entry, kind: .expense, sign: 1, category: nil) }
         #expect(throws: LedgerError.wrongCategoryKind) { try context.decide(entry, kind: .expense, sign: 1, category: salary) }
-        try context.decide(entry, kind: .transfer, sign: 1, category: salary)
+        #expect(throws: LedgerError.wrongCategoryKind) { try context.decide(entry, kind: .transfer, sign: 1, category: salary) }
+        try context.decide(entry, kind: .transfer, sign: 1, category: nil)
         #expect(entry.kind == .transfer)
         #expect(entry.category == nil)
         #expect(try context.reviewQueue().isEmpty)
+        let savings = try context.category(named: "To savings", kind: .transfer)
+        try context.decide(entry, kind: .transfer, sign: 1, category: savings)
+        #expect(entry.category === savings)
     }
 
     @Test("Chips come most-used first, then by name")
@@ -204,6 +208,24 @@ struct MonthTotalsTests {
         #expect(t.expenseLines.map(\.name) == ["Groceries", "Dining"])
         #expect(t.expenseLines.first?.cents == 7500)
         #expect(t.unreviewed == 1)
+    }
+
+    @Test("Transfers add up by label, out and in apart, with the unlabelled last")
+    func transfers() {
+        let items = [
+            Item(monthKey: "2026-10", kind: .transfer, contribution: -50000, category: "To savings"),
+            Item(monthKey: "2026-10", kind: .transfer, contribution: 50000, category: "To savings"),
+            Item(monthKey: "2026-10", kind: .transfer, contribution: -20000, category: "To savings"),
+            Item(monthKey: "2026-10", kind: .transfer, contribution: -999999, category: nil),
+            Item(monthKey: "2026-10", kind: .transfer, contribution: -1000, category: "Card payment"),
+        ]
+        let t = MonthTotals(month: "2026-10", items: items)
+        #expect(t.income == 0 && t.expenses == 0)
+        #expect(t.transferLines.map(\.name) == ["To savings", "Card payment", MonthTotals.unlabelled])
+        #expect(t.transferLines[0].out == 70000 && t.transferLines[0].into == 50000)
+        let year = MonthTotals(adding: [t, t])
+        #expect(year.transferLines[0].out == 140000)
+        #expect(year.transferLines.last?.out == 1999998)
     }
 
     @Test("A transaction's contribution follows its sign, not the bank's")

@@ -176,6 +176,7 @@ struct OverviewScreen: View {
             CategoryBars(title: "Income by category", lines: totals.incomeLines, color: ChartColor.income) {
                 category = CategoryPick(name: $0, kind: .income)
             }
+            TransferList(lines: totals.transferLines)
         }
         .opacity(updating ? 0.45 : 1)
         .animation(.default, value: updating)
@@ -377,6 +378,38 @@ struct CategoryBars: View {
                     Button(all ? "Show fewer" : "Show all \(lines.count)") { all.toggle() }
                         .font(.subheadline)
                 }
+            }
+        }
+    }
+}
+
+/// Money moved between your own accounts, by label, out and in apart.
+struct TransferList: View {
+    let lines: [MonthTotals.TransferLine]
+
+    var body: some View {
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Between your accounts").font(.headline)
+                Grid(alignment: .trailing, horizontalSpacing: 16, verticalSpacing: 8) {
+                    GridRow {
+                        Text("").gridColumnAlignment(.leading)
+                        Text("Out")
+                        Text("In")
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    ForEach(lines) { line in
+                        GridRow {
+                            Text(line.name).lineLimit(1)
+                                .foregroundStyle(line.name == MonthTotals.unlabelled ? Color.secondary : Color.primary)
+                            Text(line.out == 0 ? "–" : Money.text(line.out))
+                            Text(line.into == 0 ? "–" : Money.text(line.into))
+                        }
+                        .font(.subheadline.monospacedDigit())
+                    }
+                }
+                Text("Counted in neither income nor spending. With both accounts imported, one move shows as out of one and into the other.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }

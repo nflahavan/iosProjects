@@ -618,7 +618,8 @@ struct DecisionControls: View {
 
                     if splitting {
                         splitEditor
-                    } else if let side = kind.categoryKind {
+                    } else {
+                        let side = kind.categoryKind
                         VStack(alignment: .leading, spacing: 10) {
                             HStack {
                                 Text("Category").font(.headline)
@@ -630,8 +631,15 @@ struct DecisionControls: View {
                         }
                     }
                 } else {
-                    Text("Money moving between your own accounts. It counts as neither income nor spending, and needs no category.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("Where it went").font(.headline)
+                            Text("Optional").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Text("Money moving between your own accounts counts as neither income nor spending. A label, like To savings, shows in the overview.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        chips(.transfer)
+                    }
                 }
             }
             .onChange(of: active) { _, new in
@@ -650,7 +658,7 @@ struct DecisionControls: View {
                 }
             }
         }
-        .alert("New \(kind.categoryKind?.title.lowercased() ?? "") category", isPresented: $adding) {
+        .alert(kind == .transfer ? "New transfer label" : "New \(kind.categoryKind.title.lowercased()) category", isPresented: $adding) {
             TextField("Name", text: $newName)
             Button("Add") { addCategory() }
             Button("Cancel", role: .cancel) { Telemetry.shared.log("new-category-cancelled") }
@@ -708,7 +716,7 @@ struct DecisionControls: View {
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Find a category", text: $query)
+                TextField(side == .transfer ? "Find a label" : "Find a category", text: $query)
                     .focused($searching)
                     .autocorrectionDisabled()
                     .submitLabel(.done)
@@ -794,7 +802,8 @@ struct DecisionControls: View {
             ForEach(Array(split.enumerated()), id: \.element.id) { index, draft in
                 VStack(alignment: .leading, spacing: 10) {
                     partRow(index, draft, left: left)
-                    if index == active, let side = kind.categoryKind {
+                    if index == active {
+                        let side = kind.categoryKind
                         chips(side).padding(.leading, 4).padding(.bottom, 6)
                     }
                 }
@@ -983,6 +992,9 @@ struct DecisionControls: View {
             split[active].category = chip
             // On to the next part still waiting for one.
             if let next = split.indices.first(where: { split[$0].category == nil }) { active = next }
+        } else if kind == .transfer, category === chip {
+            // A transfer's label is optional, so a second tap takes it off.
+            category = nil
         } else {
             category = chip
         }
@@ -990,7 +1002,7 @@ struct DecisionControls: View {
     }
 
     private func addCategory() {
-        guard let side = kind.categoryKind else { return }
+        let side = kind.categoryKind
         do {
             let made = try context.category(named: newName, kind: side)
             pick(made)

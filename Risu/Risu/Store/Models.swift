@@ -6,21 +6,28 @@ nonisolated enum Kind: String, Codable, CaseIterable, Identifiable, Sendable {
     case income, expense, transfer
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
-    /// The category list it draws from. Transfers have none.
-    var categoryKind: CategoryKind? {
+    /// The category list it draws from. A transfer's is labels for where
+    /// the money went ("To savings"), and picking one is optional.
+    var categoryKind: CategoryKind {
         switch self {
         case .income: .income
         case .expense: .expense
-        case .transfer: nil
+        case .transfer: .transfer
         }
     }
 }
 
-/// Every category belongs to one side of the ledger.
+/// Every category belongs to one side of the ledger, or labels a transfer.
 nonisolated enum CategoryKind: String, Codable, CaseIterable, Identifiable, Sendable {
-    case income, expense
+    case income, expense, transfer
     var id: String { rawValue }
-    var title: String { self == .income ? "Income" : "Expenses" }
+    var title: String {
+        switch self {
+        case .income: "Income"
+        case .expense: "Expenses"
+        case .transfer: "Transfers"
+        }
+    }
 }
 
 /// One kind of CSV: "Chase Sapphire", "BofA Checking". It's also the account.
