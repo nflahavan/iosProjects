@@ -334,6 +334,32 @@ struct SplitTests {
         #expect(throws: LedgerError.categoryInUse("Household")) { try context.remove(household) }
     }
 
+    @Test("A category lists each transaction once, with its share of a split")
+    func categoryLines() throws {
+        let source = try #require(entry.file?.source)
+        try context.importFile(named: "b.csv", contents: Data("""
+        Date,Description,Amount
+        10/02/2026,GROCER,-20.00
+        10/09/2026,GROCER REFUND,5.00
+        """.utf8), into: source)
+        let queue = try context.reviewQueue()
+        let grocer = try #require(queue.first { $0.text == "GROCER" })
+        let refund = try #require(queue.first { $0.text == "GROCER REFUND" })
+        try context.decide(grocer, kind: .expense, sign: 1, category: groceries)
+        try context.decide(refund, kind: .expense, sign: -1, category: groceries)
+        // Two receipt lines in groceries make one line of 120, not two.
+        try context.decideSplit(entry, kind: .expense, sign: 1,
+                                parts: [(10000, groceries, "Milk"), (3000, household, "Soap"), (2000, groceries, "Eggs")])
+
+        let lines = groceries.lines
+        #expect(lines.map(\.entry.text) == ["GROCER REFUND", "TARGET", "GROCER"])
+        #expect(lines.map(\.cents) == [500, 12000, 2000])
+        #expect(lines.map(\.isPartial) == [false, true, false])
+        #expect(lines.map(\.bankCents) == [500, -12000, -2000])
+        #expect(lines.reduce(0) { $0 + $1.counted } == 13500)
+        #expect(household.lines.map(\.cents) == [3000])
+    }
+
     @Test("A split row is still one bank row to the merge")
     func merge() throws {
         try context.decideSplit(entry, kind: .expense, sign: 1, parts: [(10000, groceries, ""), (5000, household, "")])

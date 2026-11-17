@@ -173,18 +173,16 @@ struct CategoriesScreen: View {
                 ForEach(CategoryKind.allCases) { side in
                     Section {
                         ForEach(context.categories(side)) { category in
-                            Button {
-                                newName = category.name
-                                renaming = category
-                            } label: {
+                            NavigationLink(value: category) {
                                 LabeledContent(category.name, value: "\(category.uses)")
                             }
-                            .buttonStyle(.plain)
                             .swipeActions {
                                 Button("Delete", role: .destructive) {
                                     do { try context.remove(category); Telemetry.shared.log("category-deleted") }
                                     catch { problem = error.localizedDescription }
                                 }
+                                Button("Rename") { newName = category.name; renaming = category }
+                                    .tint(.blue)
                             }
                         }
                         Button("Add \(side.title.lowercased()) category") { newName = ""; adding = side }
@@ -192,6 +190,7 @@ struct CategoriesScreen: View {
                 }
             }
             .navigationTitle("Categories")
+            .navigationDestination(for: Category.self) { CategoryScreen(category: $0) }
             .alert("Rename", isPresented: .constant(renaming != nil)) {
                 TextField("Name", text: $newName)
                 Button("Save") {
@@ -219,6 +218,131 @@ struct CategoriesScreen: View {
             } message: { Text(problem ?? "") }
             .screen("categories")
         }
+    }
+}
+
+/// The transactions that make up one category, by month, newest first.
+struct CategoryScreen: View {
+    let category: Category
+    @Environment(\.modelContext) private var context
+    @State private var editing: LedgerEntry?
+    @State private var renaming = false
+    @State private var newName = ""
+    @State private var problem: String?
+
+    private var months: [(key: String, lines: [CategoryLine])] {
+        Dictionary(grouping: category.lines, by: { $0.entry.day.monthKey })
+            .sorted { $0.key > $1.key }
+            .map { ($0.key, $0.value) }
+    }
+
+    var body: some View {
+        let lines = category.lines
+        List {
+            if !lines.isEmpty {
+                Section { total(of: lines) }
+            }
+            ForEach(months, id: \.key) { month in
+                Section {
+                    ForEach(month.lines) { line in
+                        Button {
+                            editing = line.entry
+                            Telemetry.shared.log("open-transaction", ["from": "category", "reviewed": "\(line.entry.isReviewed)"])
+                        } label: {
+                            CategoryLineRow(line: line)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    HStack {
+                        Text(monthTitle(month.key))
+                        Spacer()
+                        Text(subtotal(of: month.lines)).monospacedDigit()
+                    }
+                }
+            }
+        }
+        .overlay {
+            if lines.isEmpty {
+                ContentUnavailableView("Nothing here yet", systemImage: "tray",
+                                       description: Text("Transactions you put in \(category.name) will be listed here."))
+            }
+        }
+        .navigationTitle(category.name)
+        .toolbar {
+            Button("Rename", systemImage: "pencil") { newName = category.name; renaming = true }
+        }
+        .alert("Rename", isPresented: $renaming) {
+            TextField("Name", text: $newName)
+            Button("Save") {
+                do { try context.rename(category, to: newName); Telemetry.shared.log("category-renamed") }
+                catch { problem = error.localizedDescription }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Can't do that", isPresented: .constant(problem != nil)) {
+            Button("OK") { problem = nil }
+        } message: { Text(problem ?? "") }
+        .sheet(item: $editing) { EditEntrySheet(entry: $0) }
+        .screen("category")
+    }
+
+    @ViewBuilder private func total(of lines: [CategoryLine]) -> some View {
+        let count = "\(lines.count) transaction" + (lines.count == 1 ? "" : "s")
+        if category.kind == .transfer {
+            // Transfers count both ways; say each.
+            let out = lines.filter { $0.bankCents < 0 }.reduce(0) { $0 + $1.cents }
+            let into = lines.filter { $0.bankCents > 0 }.reduce(0) { $0 + $1.cents }
+            LabeledContent(count) {
+                Text([out > 0 ? "−" + Money.text(out) + " out" : nil,
+                      into > 0 ? "+" + Money.text(into) + " in" : nil].compactMap { $0 }.joined(separator: ", "))
+                    .monospacedDigit()
+            }
+        } else {
+            LabeledContent(count) {
+                Text(signed(lines.reduce(0) { $0 + $1.counted })).monospacedDigit().fontWeight(.semibold)
+            }
+        }
+    }
+
+    private func subtotal(of lines: [CategoryLine]) -> String {
+        category.kind == .transfer
+            ? signed(lines.reduce(0) { $0 + $1.bankCents }, bank: true)
+            : signed(lines.reduce(0) { $0 + $1.counted })
+    }
+
+    /// An income or expense total as the overview counts it; a refund-heavy
+    /// month can go below zero. Bank amounts say which way the money went.
+    private func signed(_ cents: Int, bank: Bool = false) -> String {
+        if bank { return (cents < 0 ? "−" : "+") + Money.text(cents) }
+        return (cents < 0 ? "−" : "") + Money.text(cents)
+    }
+}
+
+/// A transaction under its category: the share that's this category's,
+/// and the whole bank amount when that's more.
+struct CategoryLineRow: View {
+    let line: CategoryLine
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(line.entry.text).lineLimit(1)
+                Text(caption).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text((line.bankCents < 0 ? "−" : "+") + Money.text(line.bankCents))
+                .monospacedDigit()
+                .foregroundStyle(line.bankCents < 0 ? Color.primary : Color.green)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var caption: String {
+        var bits = [line.entry.day.title]
+        if line.isPartial { bits.append("Part of " + Money.text(line.entry.amountCents)) }
+        if line.entry.kind != .transfer, line.entry.sign < 0 { bits.append("Refund") }
+        if let source = line.entry.file?.source?.name { bits.append(source) }
+        return bits.joined(separator: " · ")
     }
 }
 

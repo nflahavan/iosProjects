@@ -189,11 +189,43 @@ final class Category {
 
     var kind: CategoryKind { CategoryKind(rawValue: kindRaw) ?? .expense }
 
+    /// The transactions that make it up, newest first, each once, with the
+    /// part of it that's this category's: all of it, or for a split row its
+    /// pieces here added together.
+    var lines: [CategoryLine] {
+        var order: [PersistentIdentifier] = []
+        var byEntry: [PersistentIdentifier: CategoryLine] = [:]
+        func add(_ entry: LedgerEntry, _ cents: Int) {
+            let id = entry.persistentModelID
+            if byEntry[id] == nil { order.append(id); byEntry[id] = CategoryLine(entry: entry, cents: 0) }
+            byEntry[id]?.cents += cents
+        }
+        for entry in entries { add(entry, abs(entry.amountCents)) }
+        for part in parts { if let entry = part.entry { add(entry, part.cents) } }
+        return order.compactMap { byEntry[$0] }.sorted {
+            $0.entry.dayKey != $1.entry.dayKey ? $0.entry.dayKey > $1.entry.dayKey : $0.entry.row < $1.entry.row
+        }
+    }
+
     init(name: String, kind: CategoryKind) {
         self.name = name
         self.kindRaw = kind.rawValue
         self.createdAt = .now
     }
+}
+
+/// One transaction as a category sees it.
+struct CategoryLine: Identifiable {
+    let entry: LedgerEntry
+    /// This category's share of the bank amount, always positive.
+    var cents: Int
+    var id: PersistentIdentifier { entry.persistentModelID }
+    /// What it adds to the category's total: a refund takes away.
+    var counted: Int { entry.sign * cents }
+    /// The share, signed the way the bank had it: positive is money in.
+    var bankCents: Int { entry.amountCents < 0 ? -cents : cents }
+    /// Only part of the bank row is this category's.
+    var isPartial: Bool { cents != abs(entry.amountCents) }
 }
 
 nonisolated enum RisuStore {
