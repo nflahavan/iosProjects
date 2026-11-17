@@ -15,8 +15,10 @@ concurrency:
 
 jobs:
   test:
-    # macos-latest carries Xcode 26 only; Xcode 27 comes with the macOS 27 image.
-    runs-on: macos-27
+    # As of 2026-11-17 this image has Xcode 26 only, so the next step stops
+    # with a message; it starts passing once GitHub adds Xcode 27. (There's
+    # no macos-27 image to ask for yet: a job for it waits forever.)
+    runs-on: macos-latest
     timeout-minutes: 30
     defaults:
       run:
