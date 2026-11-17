@@ -1,0 +1,69 @@
+name: Risu tests
+
+# Builds Risu and runs its tests in an iPhone simulator, on GitHub's Mac,
+# so a change can be checked without this repo's Mac at hand.
+on:
+  push:
+    paths:
+      - "Risu/**"
+      - ".github/workflows/risu-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: risu-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Risu
+    steps:
+      - uses: actions/checkout@v4
+
+      # Risu targets iOS 27, so it needs an Xcode 27; the image's default
+      # may be older. Take the newest 27 it has, betas included.
+      - name: Pick Xcode 27
+        run: |
+          ls -d /Applications/Xcode*.app
+          xcode=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$xcode" ]; then
+            echo "::error::This runner image has no Xcode 27, which Risu's iOS 27 target needs."
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$xcode/Contents/Developer" xcodebuild -version
+
+      # Any iPhone on an iOS 27 runtime will do; device names vary by image.
+      - name: Pick a simulator
+        run: |
+          xcrun simctl list runtimes
+          udid=$(xcrun simctl list devices available -j | jq -r '
+            .devices | to_entries[] | select(.key | test("iOS-27")) | .value[]
+            | select(.name | startswith("iPhone")) | .udid' | head -1)
+          if [ -z "$udid" ]; then
+            echo "::error::No iPhone simulator on an iOS 27 runtime."
+            exit 1
+          fi
+          echo "SIM=$udid" >> "$GITHUB_ENV"
+
+      # The simulator needs no signing, and the personal team's certificate
+      # isn't on this machine (nor should it be).
+      - name: Test
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -scheme Risu \
+            -destination "id=$SIM" \
+            -derivedDataPath build \
+            -resultBundlePath build/Risu.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Keep the results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Risu-test-results
+          path: Risu/build/Risu.xcresult
