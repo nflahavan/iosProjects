@@ -460,6 +460,34 @@ actor LedgerReader {
     }
 }
 
+extension Category {
+    /// One thing filed under a category: a whole transaction, or one piece of a split.
+    struct Line: Identifiable {
+        var id: PersistentIdentifier
+        var entry: LedgerEntry
+        /// What it adds to the category's total, so a refund is negative. A
+        /// transfer's is as the bank had it: negative went out.
+        var cents: Int
+        /// The receipt line or split piece it was, when it's part of a split.
+        var part: SplitPart?
+    }
+
+    /// Everything that makes the category up, newest first.
+    var lines: [Line] {
+        let whole = entries.map {
+            Line(id: $0.persistentModelID, entry: $0, cents: $0.kind == .transfer ? $0.amountCents : $0.contribution)
+        }
+        let pieces = parts.compactMap { part in
+            part.entry.map { Line(id: part.persistentModelID, entry: $0, cents: $0.sign * part.cents, part: part) }
+        }
+        return (whole + pieces).sorted {
+            if $0.entry.dayKey != $1.entry.dayKey { return $0.entry.dayKey > $1.entry.dayKey }
+            if $0.entry.row != $1.entry.row { return $0.entry.row < $1.entry.row }
+            return ($0.part?.order ?? 0) < ($1.part?.order ?? 0)
+        }
+    }
+}
+
 extension LedgerEntry {
     /// What it adds to its month: one item, or one per split part.
     var totalsItems: [MonthTotals.Item] {

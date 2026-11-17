@@ -173,18 +173,15 @@ struct CategoriesScreen: View {
                 ForEach(CategoryKind.allCases) { side in
                     Section {
                         ForEach(context.categories(side)) { category in
-                            Button {
-                                newName = category.name
-                                renaming = category
-                            } label: {
+                            NavigationLink(value: category) {
                                 LabeledContent(category.name, value: "\(category.uses)")
                             }
-                            .buttonStyle(.plain)
                             .swipeActions {
                                 Button("Delete", role: .destructive) {
                                     do { try context.remove(category); Telemetry.shared.log("category-deleted") }
                                     catch { problem = error.localizedDescription }
                                 }
+                                Button("Rename") { rename(category) }
                             }
                         }
                         Button("Add \(side.title.lowercased()) category") { newName = ""; adding = side }
@@ -192,6 +189,9 @@ struct CategoriesScreen: View {
                 }
             }
             .navigationTitle("Categories")
+            .navigationDestination(for: Category.self) { category in
+                CategoryTransactions(category: category) { rename(category) }
+            }
             .alert("Rename", isPresented: .constant(renaming != nil)) {
                 TextField("Name", text: $newName)
                 Button("Save") {
@@ -219,6 +219,81 @@ struct CategoriesScreen: View {
             } message: { Text(problem ?? "") }
             .screen("categories")
         }
+    }
+
+    private func rename(_ category: Category) {
+        newName = category.name
+        renaming = category
+    }
+}
+
+/// The transactions, and pieces of split ones, filed under one category.
+struct CategoryTransactions: View {
+    let category: Category
+    let rename: () -> Void
+    @State private var editing: LedgerEntry?
+
+    var body: some View {
+        let lines = category.lines
+        let months = Dictionary(grouping: lines, by: { $0.entry.day.monthKey }).sorted { $0.key > $1.key }
+        List {
+            ForEach(months, id: \.key) { month in
+                Section {
+                    ForEach(month.value) { line in
+                        Button {
+                            editing = line.entry
+                            Telemetry.shared.log("open-transaction", ["from": "category"])
+                        } label: { row(line) }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    HStack {
+                        Text(monthTitle(month.key))
+                        Spacer()
+                        Text(amount(month.value.reduce(0) { $0 + $1.cents })).monospacedDigit()
+                    }
+                }
+            }
+        }
+        .overlay {
+            if lines.isEmpty {
+                ContentUnavailableView("Nothing here yet", systemImage: "tray",
+                                       description: Text("Transactions you file under \(category.name) will be listed here."))
+            }
+        }
+        .navigationTitle(category.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { Button("Rename", action: rename) }
+        .sheet(item: $editing) { EditEntrySheet(entry: $0) }
+        .screen("category-transactions")
+    }
+
+    private func row(_ line: Category.Line) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(line.entry.text).lineLimit(1)
+                Text(caption(line)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Text(amount(line.cents)).monospacedDigit()
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func caption(_ line: Category.Line) -> String {
+        var text = line.entry.day.title
+        if let part = line.part {
+            text += part.label.isEmpty ? " · Part of \(Money.text(line.entry.amountCents))"
+                                       : " · \(part.label), part of \(Money.text(line.entry.amountCents))"
+        }
+        if category.kind != .transfer, line.entry.sign < 0 { text += " · Refund" }
+        return text
+    }
+
+    /// A transfer shows which way it went; anything else is plain unless it takes away.
+    private func amount(_ cents: Int) -> String {
+        let sign = cents < 0 ? "−" : category.kind == .transfer && cents > 0 ? "+" : ""
+        return sign + Money.text(cents)
     }
 }
 

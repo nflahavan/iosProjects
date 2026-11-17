@@ -183,6 +183,29 @@ struct LedgerTests {
         try context.decide(try #require(try context.reviewQueue().first), kind: .expense, sign: 1, category: gifts)
         #expect(throws: LedgerError.categoryInUse("Gifts")) { try context.remove(gifts) }
     }
+
+    @Test("A category lists what makes it up: whole transactions and split pieces, newest first")
+    func categoryLines() throws {
+        let card = try context.addSource(name: "Card", header: ["Date", "Description", "Amount"], mapping: mapping)
+        try context.importFile(named: "oct.csv", contents: csv("""
+        10/01/2026,GROCER,-20.00
+        10/05/2026,CORNER STORE,-30.00
+        10/07/2026,GROCER RETURN,5.00
+        """), into: card)
+        let groceries = try context.category(named: "Groceries", kind: .expense)
+        let household = try context.category(named: "Household", kind: .expense)
+        let queue = try context.reviewQueue()
+        try context.decide(try #require(queue.first { $0.text == "GROCER" }), kind: .expense, sign: 1, category: groceries)
+        try context.decide(try #require(queue.first { $0.text == "GROCER RETURN" }), kind: .expense, sign: -1, category: groceries)
+        try context.decideSplit(try #require(queue.first { $0.text == "CORNER STORE" }), kind: .expense, sign: 1,
+                                parts: [(1200, groceries, "Oat Milk"), (1800, household, "Tea Towels")])
+
+        let lines = groceries.lines
+        #expect(lines.map(\.entry.text) == ["GROCER RETURN", "CORNER STORE", "GROCER"])
+        #expect(lines.map(\.cents) == [-500, 1200, 2000])
+        #expect(lines.map { $0.part?.label } == [nil, "Oat Milk", nil])
+        #expect(household.lines.map(\.cents) == [1800])
+    }
 }
 
 @Suite("Month totals")
